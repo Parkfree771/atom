@@ -1,0 +1,18 @@
+.app-root {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b0f17;
+  color: #e7eaf0;
+  overflow: hidden;
+}
+
+/* 모바일 safe-area 대응 (Capacitor 래핑 시) */
+@supports (padding: env(safe-area-inset-top)) {
+  .app-root {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
