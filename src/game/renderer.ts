@@ -4,7 +4,7 @@ import {
   PLAYER_WIDTH, PLAYER_HEIGHT, ELEMENT_COLORS, ElementType,
   isBossType,
 } from './types';
-import { drawBoss } from './renderer_boss';
+import { drawBoss, getElectricGlowFilter, getLightGlowFilter } from './renderer_boss';
 
 export function createGameGraphics(stage: PIXI.Container) {
   // Layer structure
@@ -193,6 +193,8 @@ export function drawPlayer(sprite: PIXI.Sprite, state: GameState) {
 const _enemyLastHp: number[] = [];
 const _enemyLastMaxHp: number[] = [];
 const CULL_MARGIN = 80;
+// 보스 전용 glow 레이어 (ADD blend mode) — 빛나는 코어/링 overlay용
+const _bossGlowGraphics: PIXI.Graphics[] = [];
 
 export function drawEnemies(container: PIXI.Container, state: GameState, enemyGraphics: PIXI.Graphics[]) {
   const { enemies, cameraX, cameraY } = state;
@@ -200,6 +202,12 @@ export function drawEnemies(container: PIXI.Container, state: GameState, enemyGr
     const g = new PIXI.Graphics();
     container.addChild(g);
     enemyGraphics.push(g);
+    // 보스 glow 슬롯도 병렬로 준비 (재사용 풀)
+    const glow = new PIXI.Graphics();
+    glow.blendMode = PIXI.BLEND_MODES.ADD;
+    glow.visible = false;
+    container.addChild(glow);
+    _bossGlowGraphics.push(glow);
     _enemyLastHp.push(-1);
     _enemyLastMaxHp.push(-1);
   }
@@ -212,28 +220,52 @@ export function drawEnemies(container: PIXI.Container, state: GameState, enemyGr
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i];
     const g = enemyGraphics[i];
+    const glow = _bossGlowGraphics[i];
     if (!e.active) {
       g.visible = false;
+      if (glow) glow.visible = false;
       _enemyLastHp[i] = -1;
       continue;
     }
     // Viewport culling — 화면 밖 적은 숨김 (update는 계속 돌아감)
     if (e.x < viewLeft || e.x > viewRight || e.y < viewTop || e.y > viewBottom) {
       g.visible = false;
+      if (glow) glow.visible = false;
       continue;
     }
     g.visible = true;
 
     // ── 보스: 매 프레임 커스텀 렌더 (애니메이션 위해 dirty-check 무시) ──
     if (isBossType(e.type)) {
-      drawBoss(g, e, state.frameCount);
+      // Electric/Light 보스: g 자체에 GlowFilter 적용 → 진짜 bloom
+      if (e.type === 'boss_electric') {
+        if (!g.filters || g.filters.length !== 1 || (g.filters[0] as unknown) !== getElectricGlowFilter()) {
+          g.filters = [getElectricGlowFilter()];
+        }
+      } else if (e.type === 'boss_light') {
+        if (!g.filters || g.filters.length !== 1 || (g.filters[0] as unknown) !== getLightGlowFilter()) {
+          g.filters = [getLightGlowFilter()];
+        }
+      } else {
+        if (g.filters && g.filters.length > 0) g.filters = null;
+      }
+      glow.visible = true;
+      glow.clear();
+      drawBoss(g, e, state.frameCount, glow);
       _enemyLastHp[i] = e.hp;
       _enemyLastMaxHp[i] = e.maxHp;
       g.x = e.x;
       g.y = e.y;
       g.rotation = 0;  // 보스는 회전 안 함 (실루엣이 고정 방향)
+      glow.x = e.x;
+      glow.y = e.y;
+      glow.rotation = 0;
       continue;
     }
+    // 보스 아니면 glow 숨김
+    if (glow) glow.visible = false;
+    // 필터도 제거 (슬롯 재사용 시)
+    if (g.filters && g.filters.length > 0) g.filters = null;
 
     // Dirty check — HP/maxHp 변경 있을 때만 재그리기
     if (e.hp !== _enemyLastHp[i] || e.maxHp !== _enemyLastMaxHp[i]) {
@@ -282,10 +314,26 @@ export function drawProjectiles(container: PIXI.Container, state: GameState, pro
 
   for (let i = 0; i < projectiles.length; i++) {
     const p = projectiles[i];
-    const g = projGraphics[i];
+    const g = projGraphics[i] as PIXI.Graphics & { _projSig?: string };
     if (!p.active) { g.visible = false; continue; }
     g.visible = true;
-    g.clear();
+
+    // 기본 투사체(정적)만 sig 캐시로 redraw 스킵. 전기/불은 jitter 있으므로 매 프레임.
+    const isDynamic = p.elementType === '전기' || p.elementType === '불';
+    if (isDynamic) {
+      g._projSig = undefined;
+      g.clear();
+    } else {
+      const sig = `b:${p.color}:${p.radius}`;
+      if (g._projSig !== sig) {
+        g._projSig = sig;
+        g.clear();
+      } else {
+        g.x = p.x;
+        g.y = p.y;
+        continue;
+      }
+    }
 
     if (p.elementType === '전기') {
       // ── 전기 투사체: 코어 + 지지직 번개 ──
@@ -490,27 +538,94 @@ export function drawEnemyProjectiles(g: PIXI.Graphics, state: GameState) {
       const k = 1 - p.delay / Math.max(p.delay + 1, 30);  // 대략 차오르는 비율
       const v = p.variant;
       if (v === 'water_puddle') {
-        // 바닥 물 웅덩이 — 수면 라인
-        g.beginFill(0x1e3a8a, 0.28 + k * 0.25);
-        g.drawEllipse(p.x, p.y + p.radius * 0.1, p.radius * (0.7 + k * 0.3), p.radius * 0.35 * (0.7 + k * 0.3));
+        // Phase Lock — 예고: 수축하는 동심 링 3개 + 중심 코어 밝아짐
+        // 외곽 hazard 존
+        g.beginFill(0x1e3a8a, 0.18 + k * 0.22);
+        g.drawCircle(p.x, p.y, p.radius * (0.95 + k * 0.1));
         g.endFill();
-        g.lineStyle(2, 0x38bdf8, 0.8);
-        g.drawEllipse(p.x, p.y, p.radius * (0.85 + Math.sin(t * 0.3) * 0.04), p.radius * 0.45);
+        // 수축 링 (phase 주기마다 밖→안으로 들어옴 = 잠김 느낌)
+        for (let ri = 0; ri < 3; ri++) {
+          const phase = ((t + ri * 20) % 60) / 60;
+          const rr = p.radius * (1.25 - phase * 0.85);
+          const al = (1 - phase) * (0.35 + k * 0.4);
+          g.lineStyle(2 - phase * 1.2, 0x38bdf8, al);
+          g.drawCircle(p.x, p.y, rr);
+        }
+        g.lineStyle(0);
+        // 외곽 경계 링 (고정, k에 따라 밝음)
+        g.lineStyle(2.2, 0x0ea5e9, 0.6 + k * 0.35);
+        g.drawCircle(p.x, p.y, p.radius * 0.95);
+        g.lineStyle(0);
+        // 중심 코어 pulse
+        const corePulse = 0.5 + k * 0.5 + Math.sin(t * 0.25) * 0.1;
+        g.beginFill(0x0369a1, 0.85);
+        g.drawCircle(p.x, p.y, p.radius * 0.22 * corePulse);
+        g.endFill();
+        g.beginFill(0xbae6fd, 0.85);
+        g.drawCircle(p.x, p.y, p.radius * 0.12 * corePulse);
+        g.endFill();
+        g.beginFill(0xffffff, 0.9);
+        g.drawCircle(p.x, p.y, p.radius * 0.06 * corePulse);
+        g.endFill();
+        // 십자 crosshair (계측기 느낌)
+        g.lineStyle(1.4, 0x7dd3fc, 0.6 + k * 0.3);
+        g.moveTo(p.x - p.radius * 0.85, p.y);
+        g.lineTo(p.x - p.radius * 0.55, p.y);
+        g.moveTo(p.x + p.radius * 0.55, p.y);
+        g.lineTo(p.x + p.radius * 0.85, p.y);
+        g.moveTo(p.x, p.y - p.radius * 0.85);
+        g.lineTo(p.x, p.y - p.radius * 0.55);
+        g.moveTo(p.x, p.y + p.radius * 0.55);
+        g.lineTo(p.x, p.y + p.radius * 0.85);
         g.lineStyle(0);
       } else if (v === 'fire_meteor') {
-        // 낙하 마커 — 타겟 링 + 위쪽 red glow 접근
-        g.lineStyle(3, 0xdc2626, 0.5 + k * 0.45);
-        g.drawCircle(p.x, p.y, p.radius * (0.7 + k * 0.3));
-        g.lineStyle(1.5, 0xf97316, 0.8);
-        g.drawCircle(p.x, p.y, p.radius * 0.45);
-        g.lineStyle(0);
-        // 하늘에서 떨어지는 불덩이 (y 위쪽)
-        const fallY = p.y - 240 * (1 - k);
-        g.beginFill(0xdc2626, 0.9);
-        g.drawCircle(p.x, fallY, 10);
+        // Meteor Rain 예고 — 지면 헥사 hazard + 낙하하는 플라즈마 창
+        const R = p.radius;
+        // 외곽 hazard 존
+        g.beginFill(0x7f1d1d, 0.2 + k * 0.25);
+        g.drawCircle(p.x, p.y, R * (0.85 + k * 0.25));
         g.endFill();
-        g.beginFill(0xfbbf24, 0.9);
-        g.drawCircle(p.x, fallY, 5);
+        // 육각 타겟 reticle (점증)
+        const hexRot = t * 0.04;
+        g.lineStyle(2.5, 0xdc2626, 0.55 + k * 0.4);
+        for (let i = 0; i <= 6; i++) {
+          const a = hexRot + (i / 6) * Math.PI * 2;
+          const hx = p.x + Math.cos(a) * R * (0.8 + k * 0.1);
+          const hy = p.y + Math.sin(a) * R * (0.8 + k * 0.1);
+          if (i === 0) g.moveTo(hx, hy); else g.lineTo(hx, hy);
+        }
+        g.lineStyle(0);
+        // 내부 반경 (hot)
+        g.lineStyle(1.8, 0xf97316, 0.85);
+        g.drawCircle(p.x, p.y, R * 0.45);
+        g.lineStyle(0);
+        // 중앙 pulse
+        const corePulse = 0.4 + k * 0.5 + Math.sin(t * 0.25) * 0.08;
+        g.beginFill(0xdc2626, 0.7);
+        g.drawCircle(p.x, p.y, R * 0.22 * corePulse);
+        g.endFill();
+        g.beginFill(0xfde047, 0.85);
+        g.drawCircle(p.x, p.y, R * 0.10 * corePulse);
+        g.endFill();
+        // 상공에서 내려오는 플라즈마 창 (기울어진 streak)
+        const fallProgress = k;
+        const fallStartY = p.y - 280 * (1 - fallProgress);
+        const fallEndY   = p.y - 220 * (1 - fallProgress) + 50;
+        const fallX      = p.x + Math.sin(fallProgress * Math.PI) * 6;
+        g.lineStyle(7, 0x7f1d1d, 0.5);
+        g.moveTo(fallX, fallStartY); g.lineTo(p.x, fallEndY);
+        g.lineStyle(4, 0xf97316, 0.92);
+        g.moveTo(fallX, fallStartY); g.lineTo(p.x, fallEndY);
+        g.lineStyle(1.8, 0xfde047, 0.95);
+        g.moveTo(fallX, fallStartY); g.lineTo(p.x, fallEndY);
+        g.lineStyle(0);
+        g.beginFill(0xfef3c7, 0.9);
+        const perpX = (p.x - fallX) / Math.max(1, Math.abs(fallEndY - fallStartY)) * 6;
+        g.drawPolygon([
+          p.x + perpX, fallEndY + 12,
+          p.x - 4, fallEndY,
+          p.x + 4, fallEndY,
+        ]);
         g.endFill();
       } else if (v === 'earth_rupture') {
         // 균열 성장 라인 — 중심에서 방사
@@ -567,22 +682,67 @@ export function drawEnemyProjectiles(g: PIXI.Graphics, state: GameState) {
       const v = p.variant;
       const pulse = p.life / 20;  // 20→0 페이드
       if (v === 'water_puddle') {
-        g.beginFill(0x38bdf8, 0.65 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * (1 + (1 - pulse) * 0.4));
+        // Phase Lock 폭발 — 밝은 코어 + 밖으로 번지는 shockwave 링
+        const expand = 1 + (1 - pulse) * 0.6;
+        g.beginFill(0x0ea5e9, 0.5 * pulse);
+        g.drawCircle(p.x, p.y, p.radius * expand);
         g.endFill();
-        g.beginFill(0x7dd3fc, 0.8 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * 0.55);
+        g.beginFill(0x7dd3fc, 0.85 * pulse);
+        g.drawCircle(p.x, p.y, p.radius * 0.55 * expand);
         g.endFill();
+        g.beginFill(0xe0f2fe, 0.9 * pulse);
+        g.drawCircle(p.x, p.y, p.radius * 0.25);
+        g.endFill();
+        g.beginFill(0xffffff, pulse);
+        g.drawCircle(p.x, p.y, p.radius * 0.12);
+        g.endFill();
+        // 확장 링 (shockwave)
+        g.lineStyle(3 * pulse + 0.5, 0xbae6fd, 0.9 * pulse);
+        g.drawCircle(p.x, p.y, p.radius * (1 + (1 - pulse) * 1.2));
+        g.lineStyle(0);
       } else if (v === 'fire_meteor') {
-        g.beginFill(0xfbbf24, 0.8 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * (1 + (1 - pulse) * 0.6));
+        // Meteor 폭발 — 화염 tongue 6개 + 중앙 star burst
+        const R = p.radius;
+        const expand = 1 + (1 - pulse) * 0.5;
+        // 외곽 화염 halo
+        g.beginFill(0xdc2626, 0.5 * pulse);
+        g.drawCircle(p.x, p.y, R * 0.95 * expand);
         g.endFill();
-        g.beginFill(0xf97316, 0.8 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * 0.75);
+        g.beginFill(0xf97316, 0.75 * pulse);
+        g.drawCircle(p.x, p.y, R * 0.65 * expand);
         g.endFill();
-        g.beginFill(0xdc2626, 0.8 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * 0.45);
+        // 6방 화염 tongue (뾰족한 삼각)
+        for (let k2 = 0; k2 < 6; k2++) {
+          const a = (k2 / 6) * Math.PI * 2 + (1 - pulse) * 0.4;
+          const tipLen = R * (0.95 * expand);
+          const tipX = p.x + Math.cos(a) * tipLen;
+          const tipY = p.y + Math.sin(a) * tipLen;
+          const perpX = -Math.sin(a) * R * 0.18;
+          const perpY =  Math.cos(a) * R * 0.18;
+          const baseX = p.x + Math.cos(a) * R * 0.25;
+          const baseY = p.y + Math.sin(a) * R * 0.25;
+          g.beginFill(0xea580c, 0.92 * pulse);
+          g.drawPolygon([tipX, tipY, baseX + perpX, baseY + perpY, baseX - perpX, baseY - perpY]);
+          g.endFill();
+          g.beginFill(0xfbbf24, 0.95 * pulse);
+          g.drawPolygon([
+            p.x + Math.cos(a) * tipLen * 0.75, p.y + Math.sin(a) * tipLen * 0.75,
+            baseX + perpX * 0.55, baseY + perpY * 0.55,
+            baseX - perpX * 0.55, baseY - perpY * 0.55,
+          ]);
+          g.endFill();
+        }
+        // 중앙 코어
+        g.beginFill(0xfde047, 0.92 * pulse);
+        g.drawCircle(p.x, p.y, R * 0.22);
         g.endFill();
+        g.beginFill(0xffffff, pulse);
+        g.drawCircle(p.x, p.y, R * 0.10);
+        g.endFill();
+        // shockwave 링
+        g.lineStyle(3 * pulse + 0.5, 0xfef3c7, 0.85 * pulse);
+        g.drawCircle(p.x, p.y, R * (1 + (1 - pulse) * 1.0));
+        g.lineStyle(0);
       } else if (v === 'earth_rupture') {
         g.beginFill(0xdc2626, 0.6 * pulse);
         g.drawCircle(p.x, p.y, p.radius * 0.9);
@@ -643,95 +803,291 @@ function drawBossProjectile(g: PIXI.Graphics, p: GameState['enemyProjectiles'][n
       break;
     }
     case 'water_ring': {
-      g.beginFill(0x38bdf8, 0.35);
-      g.drawCircle(p.x, p.y, r + 3);
+      // 진행 방향에 수직한 원호 — expanding wave 조각 (공 X)
+      const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1;
+      const dirX = p.vx / spd;
+      const dirY = p.vy / spd;
+      // 원호의 중심은 뒤쪽 (호가 밖으로 볼록)
+      const R = r * 3.6;
+      const cx = p.x - dirX * R;
+      const cy = p.y - dirY * R;
+      const baseA = Math.atan2(p.y - cy, p.x - cx);
+      const HALF = 0.48;
+      // 외곽 글로우 (두꺼운 스트로크)
+      g.lineStyle(r * 1.8, 0x0369a1, 0.26);
+      g.arc(cx, cy, R, baseA - HALF, baseA + HALF);
+      // 본체
+      g.lineStyle(r * 1.0, 0x0ea5e9, 0.92);
+      g.arc(cx, cy, R, baseA - HALF * 0.82, baseA + HALF * 0.82);
+      // 밝은 코어
+      g.lineStyle(r * 0.45, 0xbae6fd, 0.95);
+      g.arc(cx, cy, R, baseA - HALF * 0.66, baseA + HALF * 0.66);
+      // 중앙 흰 하이라이트
+      g.lineStyle(r * 0.18, 0xffffff, 1);
+      g.arc(cx, cy, R, baseA - HALF * 0.32, baseA + HALF * 0.32);
+      g.lineStyle(0);
+      // 호 끝 스파크 2개
+      const tipX1 = cx + Math.cos(baseA - HALF * 0.82) * R;
+      const tipY1 = cy + Math.sin(baseA - HALF * 0.82) * R;
+      const tipX2 = cx + Math.cos(baseA + HALF * 0.82) * R;
+      const tipY2 = cy + Math.sin(baseA + HALF * 0.82) * R;
+      g.beginFill(0x7dd3fc, 0.85);
+      g.drawCircle(tipX1, tipY1, r * 0.28);
+      g.drawCircle(tipX2, tipY2, r * 0.28);
       g.endFill();
-      g.beginFill(0x0ea5e9, 0.88);
-      g.drawCircle(p.x, p.y, r);
-      g.endFill();
-      g.beginFill(0xbae6fd, 0.85);
-      g.drawCircle(p.x - r * 0.25, p.y - r * 0.25, r * 0.4);
+      break;
+    }
+    case 'water_wavefront': {
+      // 물 스트리크 빔 — 진행 방향으로 길게 뻗은 흐름 (공 X)
+      const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1;
+      const dirX = p.vx / spd;
+      const dirY = p.vy / spd;
+      const tipF    = r * 4.0;  // 전방 리치
+      const trail   = r * 6.5;  // 후방 꼬리
+      const px0 = p.x;
+      const py0 = p.y;
+      // 꼬리 4단 (taper + 페이드)
+      for (let k = 0; k < 4; k++) {
+        const t0 = k / 4, t1 = (k + 1) / 4;
+        const x0 = px0 - dirX * trail * t0;
+        const y0 = py0 - dirY * trail * t0;
+        const x1 = px0 - dirX * trail * t1;
+        const y1 = py0 - dirY * trail * t1;
+        const wK = r * (1.9 - t0 * 1.2);
+        g.lineStyle(wK, 0x075985, 0.55 - k * 0.12);
+        g.moveTo(x0, y0); g.lineTo(x1, y1);
+      }
+      // 외곽 글로우 (전체 길이)
+      g.lineStyle(r * 2.2, 0x0ea5e9, 0.28);
+      g.moveTo(px0 - dirX * trail * 0.6, py0 - dirY * trail * 0.6);
+      g.lineTo(px0 + dirX * tipF, py0 + dirY * tipF);
+      // 본체 스트리크
+      g.lineStyle(r * 1.1, 0x0284c7, 0.92);
+      g.moveTo(px0 - dirX * r * 1.5, py0 - dirY * r * 1.5);
+      g.lineTo(px0 + dirX * tipF, py0 + dirY * tipF);
+      // 내부 밝은 코어
+      g.lineStyle(r * 0.55, 0xbae6fd, 0.95);
+      g.moveTo(px0 - dirX * r * 1.2, py0 - dirY * r * 1.2);
+      g.lineTo(px0 + dirX * tipF * 0.9, py0 + dirY * tipF * 0.9);
+      // 최전방 white hot tip
+      g.lineStyle(r * 0.22, 0xffffff, 1.0);
+      g.moveTo(px0 + dirX * tipF * 0.3, py0 + dirY * tipF * 0.3);
+      g.lineTo(px0 + dirX * tipF * 0.85, py0 + dirY * tipF * 0.85);
+      g.lineStyle(0);
+      // 선두에 작은 splash (원형이긴 하지만 최소 크기, 구형 느낌X)
+      g.beginFill(0xe0f2fe, 0.9);
+      g.drawCircle(px0 + dirX * tipF * 0.9, py0 + dirY * tipF * 0.9, r * 0.5);
       g.endFill();
       break;
     }
     case 'fire_ball': {
-      g.beginFill(0xf97316, 0.18);
-      g.drawCircle(p.x, p.y, r + 6);
-      g.endFill();
-      g.beginFill(0xdc2626, 0.88);
-      g.drawCircle(p.x, p.y, r);
-      g.endFill();
-      g.beginFill(0xf97316, 0.9);
-      g.drawCircle(p.x, p.y, r * 0.65);
-      g.endFill();
-      g.beginFill(0xfbbf24, 0.95);
-      g.drawCircle(p.x, p.y, r * 0.35);
-      g.endFill();
-      // 꼬리 3개 (이동 반대)
-      const speed = Math.hypot(p.vx, p.vy) || 1;
-      const ta = Math.atan2(-p.vy, -p.vx);
-      for (let k = 1; k <= 3; k++) {
-        const td = k * 4;
-        const tx = p.x + Math.cos(ta) * td;
-        const ty = p.y + Math.sin(ta) * td;
-        const tr = r * (1 - k * 0.22);
-        g.beginFill(0xf97316, 0.5 - k * 0.12);
-        g.drawCircle(tx, ty, tr);
-        g.endFill();
+      // Plasma Lance — 길게 뻗은 플라즈마 창 (공 X)
+      const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1;
+      const dirX = p.vx / spd;
+      const dirY = p.vy / spd;
+      const tipF  = r * 5.0;
+      const trail = r * 8.5;
+      // 꼬리 (taper + fade)
+      for (let k = 0; k < 5; k++) {
+        const t0 = k / 5, t1 = (k + 1) / 5;
+        const x0 = p.x - dirX * trail * t0;
+        const y0 = p.y - dirY * trail * t0;
+        const x1 = p.x - dirX * trail * t1;
+        const y1 = p.y - dirY * trail * t1;
+        g.lineStyle(r * (1.9 - t0 * 1.4), 0xea580c, 0.48 - k * 0.08);
+        g.moveTo(x0, y0); g.lineTo(x1, y1);
       }
-      void speed;
+      // 외곽 열 글로우
+      g.lineStyle(r * 2.2, 0xdc2626, 0.28);
+      g.moveTo(p.x - dirX * trail * 0.55, p.y - dirY * trail * 0.55);
+      g.lineTo(p.x + dirX * tipF, p.y + dirY * tipF);
+      // 본체 unit
+      g.lineStyle(r * 1.15, 0xf97316, 0.94);
+      g.moveTo(p.x - dirX * r * 2.2, p.y - dirY * r * 2.2);
+      g.lineTo(p.x + dirX * tipF, p.y + dirY * tipF);
+      // 내부 warm
+      g.lineStyle(r * 0.55, 0xfde047, 0.95);
+      g.moveTo(p.x - dirX * r * 1.6, p.y - dirY * r * 1.6);
+      g.lineTo(p.x + dirX * tipF * 0.92, p.y + dirY * tipF * 0.92);
+      // 선두 white hot
+      g.lineStyle(r * 0.22, 0xffffff, 1);
+      g.moveTo(p.x + dirX * tipF * 0.35, p.y + dirY * tipF * 0.35);
+      g.lineTo(p.x + dirX * tipF * 0.88, p.y + dirY * tipF * 0.88);
+      g.lineStyle(0);
+      // 선두 작은 화염 spark (삼각)
+      const sTip = { x: p.x + dirX * tipF * 1.02, y: p.y + dirY * tipF * 1.02 };
+      const sLx  = p.x + dirX * tipF * 0.85 + (-dirY) * r * 0.32;
+      const sLy  = p.y + dirY * tipF * 0.85 + ( dirX) * r * 0.32;
+      const sRx  = p.x + dirX * tipF * 0.85 - (-dirY) * r * 0.32;
+      const sRy  = p.y + dirY * tipF * 0.85 - ( dirX) * r * 0.32;
+      g.beginFill(0xfef3c7, 0.9);
+      g.drawPolygon([sTip.x, sTip.y, sLx, sLy, sRx, sRy]);
+      g.endFill();
       break;
     }
     case 'fire_spiral': {
-      g.beginFill(0xdc2626, 0.22);
-      g.drawCircle(p.x, p.y, r + 4);
+      // Corona Whirl — 삼각 불꽃 + 나선 꼬리 잔상 (공 X)
+      const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1;
+      const dirX = p.vx / spd;
+      const dirY = p.vy / spd;
+      const perpX = -dirY;
+      const perpY =  dirX;
+      // 삼각 불꽃 (앞 뾰족, 뒤 넓음)
+      const tipX = p.x + dirX * r * 1.9;
+      const tipY = p.y + dirY * r * 1.9;
+      const baseAx = p.x - dirX * r * 0.6 + perpX * r * 0.85;
+      const baseAy = p.y - dirY * r * 0.6 + perpY * r * 0.85;
+      const baseBx = p.x - dirX * r * 0.6 - perpX * r * 0.85;
+      const baseBy = p.y - dirY * r * 0.6 - perpY * r * 0.85;
+      // 외곽 글로우
+      g.beginFill(0xdc2626, 0.32);
+      g.drawPolygon([
+        tipX + dirX * 4, tipY + dirY * 4,
+        baseAx + perpX * 2.5, baseAy + perpY * 2.5,
+        baseBx - perpX * 2.5, baseBy - perpY * 2.5,
+      ]);
       g.endFill();
-      g.beginFill(0xea580c, 0.9);
-      g.drawCircle(p.x, p.y, r);
+      // 외곽 orange
+      g.beginFill(0xea580c, 0.94);
+      g.drawPolygon([tipX, tipY, baseAx, baseAy, baseBx, baseBy]);
       g.endFill();
-      g.beginFill(0xfbbf24, 0.9);
-      g.drawCircle(p.x, p.y, r * 0.5);
+      // 중간 amber
+      const mTipX = p.x + dirX * r * 1.3;
+      const mTipY = p.y + dirY * r * 1.3;
+      const mBaseAx = p.x - dirX * r * 0.3 + perpX * r * 0.55;
+      const mBaseAy = p.y - dirY * r * 0.3 + perpY * r * 0.55;
+      const mBaseBx = p.x - dirX * r * 0.3 - perpX * r * 0.55;
+      const mBaseBy = p.y - dirY * r * 0.3 - perpY * r * 0.55;
+      g.beginFill(0xfbbf24, 0.95);
+      g.drawPolygon([mTipX, mTipY, mBaseAx, mBaseAy, mBaseBx, mBaseBy]);
       g.endFill();
+      // 코어 yellow
+      const cTipX = p.x + dirX * r * 0.75;
+      const cTipY = p.y + dirY * r * 0.75;
+      const cBaseAx = p.x + perpX * r * 0.24;
+      const cBaseAy = p.y + perpY * r * 0.24;
+      const cBaseBx = p.x - perpX * r * 0.24;
+      const cBaseBy = p.y - perpY * r * 0.24;
+      g.beginFill(0xfde047, 0.96);
+      g.drawPolygon([cTipX, cTipY, cBaseAx, cBaseAy, cBaseBx, cBaseBy]);
+      g.endFill();
+      // 나선 꼬리 잔상 — 3단, spinAngle에 따라 오프셋
+      const spin = p.spinAngle ?? 0;
+      for (let k = 1; k <= 3; k++) {
+        const swirl = Math.sin(spin + k * 1.7) * r * 0.5;
+        const tx = p.x - dirX * k * r * 1.15 + perpX * swirl;
+        const ty = p.y - dirY * k * r * 1.15 + perpY * swirl;
+        // 작은 삼각 파편
+        const fTipX = tx + dirX * r * 0.5;
+        const fTipY = ty + dirY * r * 0.5;
+        const fBAx = tx + perpX * r * (0.35 - k * 0.06);
+        const fBAy = ty + perpY * r * (0.35 - k * 0.06);
+        const fBBx = tx - perpX * r * (0.35 - k * 0.06);
+        const fBBy = ty - perpY * r * (0.35 - k * 0.06);
+        g.beginFill(0xea580c, 0.55 - k * 0.12);
+        g.drawPolygon([fTipX, fTipY, fBAx, fBAy, fBBx, fBBy]);
+        g.endFill();
+        g.beginFill(0xfbbf24, 0.7 - k * 0.18);
+        g.drawPolygon([
+          tx + dirX * r * 0.35, ty + dirY * r * 0.35,
+          tx + perpX * r * (0.2 - k * 0.04), ty + perpY * r * (0.2 - k * 0.04),
+          tx - perpX * r * (0.2 - k * 0.04), ty - perpY * r * (0.2 - k * 0.04),
+        ]);
+        g.endFill();
+      }
       break;
     }
     case 'earth_rock': {
-      // 각진 7각형
-      const sides = 7;
-      const pts: number[] = [];
-      const rot = (p.x * 0.003 + p.y * 0.005) % (Math.PI * 2); // 고정 회전
-      for (let k = 0; k < sides; k++) {
-        const a = rot + (k / sides) * Math.PI * 2;
-        const rr = r * (0.85 + 0.25 * (k % 3 === 0 ? 1 : 0));
-        pts.push(p.x + Math.cos(a) * rr, p.y + Math.sin(a) * rr);
-      }
-      g.beginFill(0x451a03, 0.95);
-      g.drawPolygon(pts);
+      // Crystal Spear — 육각 프리즘 창 (진행 방향 회전)
+      const ang = Math.atan2(p.vy, p.vx);
+      const cosA = Math.cos(ang), sinA = Math.sin(ang);
+      const perpX = -sinA, perpY = cosA;
+      const tipF = r * 1.8;    // 전방 뾰족
+      const backF = r * 1.2;   // 후방 fat
+      const sideF = r * 0.75;  // 좌우 폭
+      const shoulderF = r * 1.0;
+      // 6각 프리즘 실루엣: 앞뾰족 + 4측면 + 뒤평
+      const hexPts: number[] = [
+        p.x + cosA * tipF,                        p.y + sinA * tipF,                         // 앞 tip
+        p.x + cosA * shoulderF + perpX * sideF,   p.y + sinA * shoulderF + perpY * sideF,    // 앞우
+        p.x - cosA * backF * 0.5 + perpX * sideF, p.y - sinA * backF * 0.5 + perpY * sideF,  // 뒤우
+        p.x - cosA * backF,                       p.y - sinA * backF,                        // 뒤 tip
+        p.x - cosA * backF * 0.5 - perpX * sideF, p.y - sinA * backF * 0.5 - perpY * sideF,  // 뒤좌
+        p.x + cosA * shoulderF - perpX * sideF,   p.y + sinA * shoulderF - perpY * sideF,    // 앞좌
+      ];
+      // 외곽 다크
+      g.beginFill(0x3f2a17, 0.97);
+      g.drawPolygon(hexPts);
       g.endFill();
-      g.beginFill(0x78350f, 0.85);
-      const inner = pts.map((v, i) => i % 2 === 0 ? p.x + (v - p.x) * 0.7 : p.y + (v - p.y) * 0.7);
-      g.drawPolygon(inner);
+      // 밝은 면 (한쪽)
+      g.beginFill(0xd97706, 0.88);
+      g.drawPolygon([
+        p.x + cosA * tipF, p.y + sinA * tipF,
+        p.x + cosA * shoulderF + perpX * sideF, p.y + sinA * shoulderF + perpY * sideF,
+        p.x - cosA * backF * 0.5 + perpX * sideF, p.y - sinA * backF * 0.5 + perpY * sideF,
+        p.x - cosA * backF, p.y - sinA * backF,
+      ]);
       g.endFill();
-      // 돌 표면 crack
-      g.lineStyle(1.2, 0x1c0a03, 0.85);
-      g.moveTo(p.x - r * 0.4, p.y - r * 0.2);
-      g.lineTo(p.x + r * 0.2, p.y + r * 0.3);
+      // 어두운 면 (반대쪽)
+      g.beginFill(0xa16207, 0.9);
+      g.drawPolygon([
+        p.x + cosA * tipF, p.y + sinA * tipF,
+        p.x - cosA * backF, p.y - sinA * backF,
+        p.x - cosA * backF * 0.5 - perpX * sideF, p.y - sinA * backF * 0.5 - perpY * sideF,
+        p.x + cosA * shoulderF - perpX * sideF, p.y + sinA * shoulderF - perpY * sideF,
+      ]);
+      g.endFill();
+      // 중심 edge highlight
+      g.lineStyle(1.4, 0xfbbf24, 0.85);
+      g.moveTo(p.x + cosA * tipF, p.y + sinA * tipF);
+      g.lineTo(p.x - cosA * backF, p.y - sinA * backF);
+      g.lineStyle(0);
+      // 외곽 결정 edge
+      g.lineStyle(1.0, 0xfde047, 0.6);
+      g.moveTo(hexPts[0], hexPts[1]);
+      for (let i = 2; i < hexPts.length; i += 2) g.lineTo(hexPts[i], hexPts[i+1]);
+      g.lineTo(hexPts[0], hexPts[1]);
       g.lineStyle(0);
       break;
     }
     case 'earth_shard': {
-      // 작은 조각 — 삼각형
+      // Crystal Shard — 뾰족한 삼각 결정 파편 (진행 방향으로 뾰족)
       const ang = Math.atan2(p.vy, p.vx);
-      const pts = [
-        p.x + Math.cos(ang) * r, p.y + Math.sin(ang) * r,
-        p.x + Math.cos(ang + Math.PI * 0.8) * r * 0.7, p.y + Math.sin(ang + Math.PI * 0.8) * r * 0.7,
-        p.x + Math.cos(ang - Math.PI * 0.8) * r * 0.7, p.y + Math.sin(ang - Math.PI * 0.8) * r * 0.7,
-      ];
-      g.beginFill(0x78350f, 0.95);
-      g.drawPolygon(pts);
+      const cosA = Math.cos(ang), sinA = Math.sin(ang);
+      const perpX = -sinA, perpY = cosA;
+      const tipF = r * 2.2;
+      const backF = r * 0.6;
+      const sideF = r * 0.85;
+      // 외곽 stone shadow (뒤로 길게, 꼬리 느낌)
+      g.beginFill(0x3f2a17, 0.95);
+      g.drawPolygon([
+        p.x + cosA * tipF, p.y + sinA * tipF,
+        p.x - cosA * backF + perpX * sideF, p.y - sinA * backF + perpY * sideF,
+        p.x - cosA * (backF + r * 0.4), p.y - sinA * (backF + r * 0.4),
+        p.x - cosA * backF - perpX * sideF, p.y - sinA * backF - perpY * sideF,
+      ]);
       g.endFill();
-      g.beginFill(0xa16207, 0.85);
-      g.drawCircle(p.x, p.y, r * 0.4);
+      // 왼쪽 brighter facet
+      g.beginFill(0xd97706, 0.92);
+      g.drawPolygon([
+        p.x + cosA * tipF, p.y + sinA * tipF,
+        p.x - cosA * backF + perpX * sideF * 0.85, p.y - sinA * backF + perpY * sideF * 0.85,
+        p.x - cosA * (backF + r * 0.2), p.y - sinA * (backF + r * 0.2),
+      ]);
       g.endFill();
+      // 오른쪽 hot facet
+      g.beginFill(0xf59e0b, 0.92);
+      g.drawPolygon([
+        p.x + cosA * tipF, p.y + sinA * tipF,
+        p.x - cosA * (backF + r * 0.2), p.y - sinA * (backF + r * 0.2),
+        p.x - cosA * backF - perpX * sideF * 0.85, p.y - sinA * backF - perpY * sideF * 0.85,
+      ]);
+      g.endFill();
+      // 중심 edge 밝은 하이라이트
+      g.lineStyle(1.2, 0xfde047, 0.9);
+      g.moveTo(p.x + cosA * tipF, p.y + sinA * tipF);
+      g.lineTo(p.x - cosA * (backF + r * 0.15), p.y - sinA * (backF + r * 0.15));
+      g.lineStyle(0);
       break;
     }
     case 'electric_bolt': {
@@ -763,48 +1119,123 @@ function drawBossProjectile(g: PIXI.Graphics, p: GameState['enemyProjectiles'][n
       break;
     }
     case 'electric_arc': {
-      g.beginFill(0x7c3aed, 0.3);
-      g.drawCircle(p.x, p.y, r + 5);
+      // Arc Burst — 뾰족한 번개 파편 (진행 방향으로 뾰족한 lightning bolt)
+      const ang = Math.atan2(p.vy, p.vx);
+      const cosA = Math.cos(ang), sinA = Math.sin(ang);
+      const perpX = -sinA, perpY = cosA;
+      const tipF = r * 2.4;
+      const backF = r * 0.6;
+      const sideF = r * 0.6;
+      const seed = Math.floor(t * 0.5 + (p.x * 0.3 + p.y * 0.5));
+      const hash1 = Math.sin(seed * 13.7) * 43758;
+      const hash2 = Math.sin(seed * 21.1) * 43758;
+      const jit1 = ((hash1 - Math.floor(hash1)) - 0.5) * r * 0.35;
+      const jit2 = ((hash2 - Math.floor(hash2)) - 0.5) * r * 0.35;
+      // 외곽 glow (zigzag 볼륨)
+      g.beginFill(0x6d28d9, 0.35);
+      g.drawPolygon([
+        p.x + cosA * tipF, p.y + sinA * tipF,
+        p.x + cosA * tipF * 0.35 + perpX * (sideF + jit1 * 0.5), p.y + sinA * tipF * 0.35 + perpY * (sideF + jit1 * 0.5),
+        p.x - cosA * backF + perpX * sideF * 0.5, p.y - sinA * backF + perpY * sideF * 0.5,
+        p.x - cosA * backF, p.y - sinA * backF,
+        p.x - cosA * backF - perpX * sideF * 0.5, p.y - sinA * backF - perpY * sideF * 0.5,
+        p.x + cosA * tipF * 0.35 - perpX * (sideF + jit2 * 0.5), p.y + sinA * tipF * 0.35 - perpY * (sideF + jit2 * 0.5),
+      ]);
       g.endFill();
-      g.beginFill(0xa855f7, 0.9);
-      g.drawCircle(p.x, p.y, r);
+      // 본체 violet bolt
+      g.beginFill(0x8b5cf6, 0.92);
+      g.drawPolygon([
+        p.x + cosA * tipF, p.y + sinA * tipF,
+        p.x + cosA * tipF * 0.5 + perpX * sideF * 0.75, p.y + sinA * tipF * 0.5 + perpY * sideF * 0.75,
+        p.x - cosA * backF, p.y - sinA * backF,
+        p.x + cosA * tipF * 0.5 - perpX * sideF * 0.75, p.y + sinA * tipF * 0.5 - perpY * sideF * 0.75,
+      ]);
       g.endFill();
-      g.beginFill(0xc4b5fd, 0.9);
-      g.drawCircle(p.x, p.y, r * 0.5);
-      g.endFill();
-      // 방사 스파크
-      for (let k = 0; k < 4; k++) {
-        const a = (k / 4) * Math.PI * 2 + t * 0.2;
-        g.lineStyle(1.2, 0xe0d8ff, 0.85);
-        g.moveTo(p.x, p.y);
-        g.lineTo(p.x + Math.cos(a) * (r + 6), p.y + Math.sin(a) * (r + 6));
-      }
+      // 코어 bright
+      g.lineStyle(r * 0.5, 0xc4b5fd, 0.95);
+      g.moveTo(p.x - cosA * backF, p.y - sinA * backF);
+      g.lineTo(p.x + cosA * tipF, p.y + sinA * tipF);
+      g.lineStyle(r * 0.18, 0xffffff, 1);
+      g.moveTo(p.x - cosA * backF * 0.7, p.y - sinA * backF * 0.7);
+      g.lineTo(p.x + cosA * tipF * 0.9, p.y + sinA * tipF * 0.9);
       g.lineStyle(0);
+      // tip spark
+      g.beginFill(0xe0e7ff, 0.95);
+      g.drawCircle(p.x + cosA * tipF, p.y + sinA * tipF, r * 0.22);
+      g.endFill();
+      g.beginFill(0xffffff, 1);
+      g.drawCircle(p.x + cosA * tipF, p.y + sinA * tipF, r * 0.1);
+      g.endFill();
       break;
     }
     case 'electric_orb': {
-      // 큰 추적 구체 + 스핀 arc
-      g.beginFill(0x4c1d95, 0.32);
-      g.drawCircle(p.x, p.y, r + 8);
-      g.endFill();
-      g.beginFill(0x581c87, 0.92);
-      g.drawCircle(p.x, p.y, r);
-      g.endFill();
-      g.beginFill(0x7c3aed, 0.85);
-      g.drawCircle(p.x, p.y, r * 0.7);
-      g.endFill();
-      g.beginFill(0xc4b5fd, 0.9);
-      g.drawCircle(p.x, p.y, r * 0.4);
-      g.endFill();
-      g.beginFill(0xe0d8ff, 0.9);
-      g.drawCircle(p.x, p.y, r * 0.2);
-      g.endFill();
-      // 스핀 아크
-      g.lineStyle(1.5, 0xa855f7, 0.8);
-      g.arc(p.x, p.y, r + 3, t * 0.1, t * 0.1 + Math.PI * 0.9);
-      g.lineStyle(1, 0xe0d8ff, 0.7);
-      g.arc(p.x, p.y, r - 1, -t * 0.15, -t * 0.15 + Math.PI * 0.7);
+      // Seeker Bolt — 번개 arms 6방 + 작은 spark core (공 실루엣 X)
+      const seed = Math.floor(t * 0.6);
+      // 6방 번개 팔 (매 프레임 jitter) — 이게 실루엣을 결정
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2 + seed * 0.1;
+        const tipR = r * (1.4 + Math.sin(seed + k) * 0.3);
+        const segs = 5;
+        const perpAX = -Math.sin(a);
+        const perpAY =  Math.cos(a);
+        // 외곽 violet glow
+        g.lineStyle(r * 0.42, 0x4c1d95, 0.35);
+        g.moveTo(p.x, p.y);
+        for (let s = 1; s < segs; s++) {
+          const tt = s / segs;
+          const hash = Math.sin(seed * 12.3 + k * 31 + s * 47) * 43758;
+          const jit = ((hash - Math.floor(hash)) - 0.5) * r * 0.28;
+          g.lineTo(
+            p.x + Math.cos(a) * tipR * tt + perpAX * jit,
+            p.y + Math.sin(a) * tipR * tt + perpAY * jit,
+          );
+        }
+        g.lineTo(p.x + Math.cos(a) * tipR, p.y + Math.sin(a) * tipR);
+        // 본체 violet
+        g.lineStyle(r * 0.18, 0x8b5cf6, 0.85);
+        g.moveTo(p.x, p.y);
+        for (let s = 1; s < segs; s++) {
+          const tt = s / segs;
+          const hash = Math.sin(seed * 15.7 + k * 37 + s * 51) * 43758;
+          const jit = ((hash - Math.floor(hash)) - 0.5) * r * 0.22;
+          g.lineTo(
+            p.x + Math.cos(a) * tipR * tt + perpAX * jit,
+            p.y + Math.sin(a) * tipR * tt + perpAY * jit,
+          );
+        }
+        g.lineTo(p.x + Math.cos(a) * tipR, p.y + Math.sin(a) * tipR);
+        // 코어 white bolt
+        g.lineStyle(r * 0.06, 0xffffff, 0.95);
+        g.moveTo(p.x, p.y);
+        for (let s = 1; s < segs; s++) {
+          const tt = s / segs;
+          const hash = Math.sin(seed * 19.1 + k * 41 + s * 57) * 43758;
+          const jit = ((hash - Math.floor(hash)) - 0.5) * r * 0.15;
+          g.lineTo(
+            p.x + Math.cos(a) * tipR * tt + perpAX * jit,
+            p.y + Math.sin(a) * tipR * tt + perpAY * jit,
+          );
+        }
+        g.lineTo(p.x + Math.cos(a) * tipR, p.y + Math.sin(a) * tipR);
+        // 팔 끝 sparks
+        g.beginFill(0xc4b5fd, 0.85);
+        g.drawCircle(p.x + Math.cos(a) * tipR, p.y + Math.sin(a) * tipR, r * 0.14);
+        g.endFill();
+        g.beginFill(0xffffff, 1);
+        g.drawCircle(p.x + Math.cos(a) * tipR, p.y + Math.sin(a) * tipR, r * 0.07);
+        g.endFill();
+      }
       g.lineStyle(0);
+      // 중앙 작은 spark core (큰 원 X, 최소)
+      g.beginFill(0x8b5cf6, 0.85);
+      g.drawCircle(p.x, p.y, r * 0.32);
+      g.endFill();
+      g.beginFill(0xe0e7ff, 0.95);
+      g.drawCircle(p.x, p.y, r * 0.18);
+      g.endFill();
+      g.beginFill(0xffffff, 1);
+      g.drawCircle(p.x, p.y, r * 0.09);
+      g.endFill();
       break;
     }
     case 'light_ray': {

@@ -174,6 +174,12 @@ export class EarthFireDarkEffect {
   // 버스트 파티클 (셀 제거 — 크랙 시각은 GLSL만)
   private particles: BurstParticle[] = [];
 
+  // 세그먼트는 설치 시점에 1회 계산 후 캐시 (매 프레임 호출되지만 기하는 불변)
+  private _segmentsCache: Array<{
+    x0: number; y0: number; x1: number; y1: number;
+    sx: number; sy: number; invSegLen2: number;
+  }> | null = null;
+
   constructor(overlayLayer: PIXI.Container, worldContainer: PIXI.Container) {
     this.worldContainer = worldContainer;
     this.container = new PIXI.Container();
@@ -196,6 +202,7 @@ export class EarthFireDarkEffect {
     this.active = true;
     this.installedX = x;
     this.installedY = y;
+    this._segmentsCache = null;
     this.time = 0;
     this.burstTimer = 0;
     this.burstFlashLife = 0;
@@ -429,23 +436,35 @@ export class EarthFireDarkEffect {
     ];
   }
 
-  /** 활성 크랙의 X자 2대각선 세그먼트 — 풀링 + 버스트 피해 판정용 */
-  getCrackSegments(): Array<{ x0: number; y0: number; x1: number; y1: number }> {
+  /** 활성 크랙의 X자 2대각선 세그먼트 — 풀링 + 버스트 피해 판정용 (설치 시 1회 계산) */
+  getCrackSegments(): Array<{
+    x0: number; y0: number; x1: number; y1: number;
+    sx: number; sy: number; invSegLen2: number;
+  }> {
     if (!this.active) return [];
-    return [
-      {
-        x0: this.installedX - DIAG1_COS * CRACK_HALF_LENGTH,
-        y0: this.installedY - DIAG1_SIN * CRACK_HALF_LENGTH,
-        x1: this.installedX + DIAG1_COS * CRACK_HALF_LENGTH,
-        y1: this.installedY + DIAG1_SIN * CRACK_HALF_LENGTH,
-      },
-      {
-        x0: this.installedX - DIAG2_COS * CRACK_HALF_LENGTH,
-        y0: this.installedY - DIAG2_SIN * CRACK_HALF_LENGTH,
-        x1: this.installedX + DIAG2_COS * CRACK_HALF_LENGTH,
-        y1: this.installedY + DIAG2_SIN * CRACK_HALF_LENGTH,
-      },
+    if (this._segmentsCache !== null) return this._segmentsCache;
+    const build = (x0: number, y0: number, x1: number, y1: number) => {
+      const sx = x1 - x0;
+      const sy = y1 - y0;
+      const segLen2 = sx * sx + sy * sy;
+      const invSegLen2 = segLen2 > 0.01 ? 1 / segLen2 : 0;
+      return { x0, y0, x1, y1, sx, sy, invSegLen2 };
+    };
+    this._segmentsCache = [
+      build(
+        this.installedX - DIAG1_COS * CRACK_HALF_LENGTH,
+        this.installedY - DIAG1_SIN * CRACK_HALF_LENGTH,
+        this.installedX + DIAG1_COS * CRACK_HALF_LENGTH,
+        this.installedY + DIAG1_SIN * CRACK_HALF_LENGTH,
+      ),
+      build(
+        this.installedX - DIAG2_COS * CRACK_HALF_LENGTH,
+        this.installedY - DIAG2_SIN * CRACK_HALF_LENGTH,
+        this.installedX + DIAG2_COS * CRACK_HALF_LENGTH,
+        this.installedY + DIAG2_SIN * CRACK_HALF_LENGTH,
+      ),
     ];
+    return this._segmentsCache;
   }
 
   pullRange(): number { return PULL_RANGE; }
@@ -457,6 +476,7 @@ export class EarthFireDarkEffect {
   stop() {
     this.active = false;
     this.particles = [];
+    this._segmentsCache = null;
     this.burstFiredThisFrame = false;
     this.gfx.clear();
     this.glowGfx.clear();

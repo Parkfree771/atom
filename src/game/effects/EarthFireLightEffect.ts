@@ -210,6 +210,7 @@ export class EarthFireLightEffect {
   private flashGfx: PIXI.Graphics;        // 화면 flash 전용
   private worldContainer: PIXI.Container;
   private filter: PIXI.Filter | null = null;
+  private _filterAttached = false;
 
   active = false;
   private posX = 0;
@@ -463,22 +464,24 @@ export class EarthFireLightEffect {
   }
 
   private attachFilter() {
-    if (!this.filter) return;
+    if (!this.filter || this._filterAttached) return;
     this.worldContainer.filterArea = new PIXI.Rectangle(0, 0, CANVAS_W, CANVAS_H);
     const existing = this.worldContainer.filters || [];
     if (!existing.includes(this.filter)) {
       this.worldContainer.filters = [...existing, this.filter];
     }
+    this._filterAttached = true;
   }
 
   private detachFilter() {
-    if (!this.filter || !this.worldContainer.filters) return;
+    if (!this.filter || !this.worldContainer.filters) { this._filterAttached = false; return; }
     this.worldContainer.filters = this.worldContainer.filters.filter(f => f !== this.filter);
     if (this.worldContainer.filters.length === 0) {
       this.worldContainer.filters = null;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.worldContainer.filterArea = null as any;
     }
+    this._filterAttached = false;
   }
 
   // ── 운석 spawn (사방 360도 random angle, 한 점으로 모임) ──

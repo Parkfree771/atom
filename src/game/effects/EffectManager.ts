@@ -1431,6 +1431,7 @@ export class EffectManager {
   /** 현재 활성 크랙의 X자 2대각선 세그먼트 (월드 좌표) — 풀링용 */
   earthFireDarkCrackSegments(): Array<{
     x0: number; y0: number; x1: number; y1: number;
+    sx: number; sy: number; invSegLen2: number;
   }> {
     return this.earthFireDarkEffect?.getCrackSegments() ?? [];
   }

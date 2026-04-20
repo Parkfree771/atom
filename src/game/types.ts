@@ -175,6 +175,7 @@ export interface EnemyProjectileState {
     | 'water_wave'       // 큰 물방울
     | 'water_ring'       // 파동 링 조각
     | 'water_puddle'     // 지연 후 폭발 (바닥 마커)
+    | 'water_wavefront'  // 사인파 진행 (sine oscillation)
     | 'fire_ball'        // 화염구
     | 'fire_spiral'      // 회전 spiral
     | 'fire_meteor'      // 하늘 낙하 (예고 후)
@@ -198,6 +199,22 @@ export interface EnemyProjectileState {
   spinAngle?: number;
   /** 스핀 속도 (tendril) */
   spinSpeed?: number;
+  /** 사인파 이동: 직진 방향에 수직하는 sin 오실레이션 */
+  waveBaseVx?: number;
+  waveBaseVy?: number;
+  wavePerpX?: number;
+  wavePerpY?: number;
+  waveAmp?: number;        // px 단위 피크 변위
+  wavePhase?: number;      // 현재 위상
+  wavePhaseSpeed?: number; // 프레임당 위상 증가
+  /** 소멸/폭발 시 radial 서브-투사체 방출 (resonance lock 등) */
+  onExpireSpawnCount?: number;
+  onExpireSpawnSpeed?: number;
+  onExpireSpawnLife?: number;
+  onExpireSpawnRadius?: number;
+  onExpireSpawnDamage?: number;
+  onExpireSpawnColor?: number;
+  onExpireSpawnVariant?: EnemyProjectileState['variant'];
 }
 
 // ── 레벨업 이벤트 시스템 ──

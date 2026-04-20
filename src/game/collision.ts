@@ -100,12 +100,21 @@ export function circleRectOverlap(
   return cornerDist <= cr * cr;
 }
 
+// Per-frame 히트 결과 풀링 — 객체 할당 재사용으로 GC 압력 감소.
+// _pool은 객체 보관(절대 축소X), _view는 호출마다 재사용되는 결과 배열.
+const _projHitsPool: Array<{ pi: number; ei: number }> = [];
+const _projHitsView: Array<{ pi: number; ei: number }> = [];
+const _wHitsPool: Array<{ wi: number; ei: number }> = [];
+const _wHitsView: Array<{ wi: number; ei: number }> = [];
+const _playerHitsView: number[] = [];
+
 export function checkProjectileEnemyCollisions(
   projectiles: ProjectileState[],
   enemies: EnemyState[],
   hash: SpatialHash
 ): Array<{ pi: number; ei: number }> {
-  const hits: Array<{ pi: number; ei: number }> = [];
+  _projHitsView.length = 0;
+  let count = 0;
   const total = enemies.length;
   for (let pi = 0; pi < projectiles.length; pi++) {
     const p = projectiles[pi];
@@ -117,12 +126,17 @@ export function checkProjectileEnemyCollisions(
       const e = enemies[ei];
       if (!e.active) continue;
       if (circleRectOverlap(p.x, p.y, p.radius, e.x, e.y, e.width, e.height)) {
-        hits.push({ pi, ei });
+        if (count === _projHitsPool.length) _projHitsPool.push({ pi: 0, ei: 0 });
+        const h = _projHitsPool[count];
+        h.pi = pi;
+        h.ei = ei;
+        _projHitsView.push(h);
+        count++;
         if (p.pierce <= 0) break;
       }
     }
   }
-  return hits;
+  return _projHitsView;
 }
 
 export function checkPlayerEnemyCollisions(
@@ -130,18 +144,18 @@ export function checkPlayerEnemyCollisions(
   enemies: EnemyState[],
   hash: SpatialHash
 ): number[] {
-  if (player.invincibleFrames > 0) return [];
+  _playerHitsView.length = 0;
+  if (player.invincibleFrames > 0) return _playerHitsView;
   const candidates = hash.query(player.x, player.y, PLAYER_WIDTH + 10, PLAYER_HEIGHT + 10, enemies.length);
-  const hits: number[] = [];
   for (let ci = 0; ci < candidates.length; ci++) {
     const ei = candidates[ci];
     const e = enemies[ei];
     if (!e.active) continue;
     if (rectOverlap(player.x, player.y, PLAYER_WIDTH, PLAYER_HEIGHT, e.x, e.y, e.width, e.height)) {
-      hits.push(ei);
+      _playerHitsView.push(ei);
     }
   }
-  return hits;
+  return _playerHitsView;
 }
 
 export function checkWeaponEffectEnemyCollisions(
@@ -149,7 +163,8 @@ export function checkWeaponEffectEnemyCollisions(
   enemies: EnemyState[],
   hash: SpatialHash
 ): Array<{ wi: number; ei: number }> {
-  const hits: Array<{ wi: number; ei: number }> = [];
+  _wHitsView.length = 0;
+  let count = 0;
   const total = enemies.length;
   for (let wi = 0; wi < effects.length; wi++) {
     const w = effects[wi];
@@ -166,9 +181,14 @@ export function checkWeaponEffectEnemyCollisions(
       const dx = w.x - e.x;
       const dy = w.y - e.y;
       if (dx * dx + dy * dy < (r + Math.max(e.width, e.height) / 2) ** 2) {
-        hits.push({ wi, ei });
+        if (count === _wHitsPool.length) _wHitsPool.push({ wi: 0, ei: 0 });
+        const h = _wHitsPool[count];
+        h.wi = wi;
+        h.ei = ei;
+        _wHitsView.push(h);
+        count++;
       }
     }
   }
-  return hits;
+  return _wHitsView;
 }
