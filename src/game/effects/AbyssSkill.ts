@@ -105,22 +105,9 @@ interface TrackedEnemy {
   absorbed: boolean;
 }
 
-interface DarkBlob {
-  // 스크린 좌표
-  sx: number; sy: number;
-  r: number;                 // 현재 반경
-  initR: number;             // 초기 반경
-  initSX: number; initSY: number;
-  spawnFrame: number;        // pull 기준 스폰 프레임
-  absorbed: boolean;
-  angle: number;             // 소용돌이 초기 각
-  dist: number;              // 중심까지 초기 거리
-}
-
 interface AbyssRuntime {
   frame: number;
   tracked: TrackedEnemy[];
-  blobs: DarkBlob[];
 
   // 스크린 좌표 기준 singularity (고정)
   centerSX: number;
@@ -151,7 +138,6 @@ export class AbyssSkill {
 
   // 오버레이 Graphics
   private darkGfx: PIXI.Graphics;           // 기본 full-screen dark
-  private blobGfx: PIXI.Graphics;           // 빨려드는 dark blob들
   private horizonGfx: PIXI.Graphics;        // 사건 지평선 ring
   private coreGfx: PIXI.Graphics;           // 특이점 코어 (ADD 아님 — void core)
   private coreGlowGfx: PIXI.Graphics;       // 특이점 외곽 보라 글로우 (ADD)
@@ -165,12 +151,10 @@ export class AbyssSkill {
     this.overlayLayer = overlayLayer;
     this.worldContainer = worldContainer;
 
-    // 렌더 순서: dark(세상을 덮음) → blob(그 위에서 수렴 시각화) → horizon → glow → core → flash
+    // 렌더 순서: dark(세상을 덮음) → horizon → glow → core → flash
+    // (가짜 dark blob 제거 — 실제 적 스프라이트가 스파이럴)
     this.darkGfx = new PIXI.Graphics();
     this.overlayLayer.addChild(this.darkGfx);
-
-    this.blobGfx = new PIXI.Graphics();
-    this.overlayLayer.addChild(this.blobGfx);
 
     this.horizonGfx = new PIXI.Graphics();
     this.horizonGfx.blendMode = PIXI.BLEND_MODES.ADD;
@@ -261,7 +245,6 @@ export class AbyssSkill {
     this.runtime = {
       frame: 0,
       tracked,
-      blobs: [],
       centerSX,
       centerSY,
       startCamX: cameraX,
@@ -316,78 +299,54 @@ export class AbyssSkill {
       }
     }
 
-    // ── PULL 시작 순간 — 적 스크린 좌표 스냅샷 + dark blob 스폰 ──
+    // ── PULL 시작 순간 — 적 스크린 좌표 스냅샷 (실제 적이 스파이럴; 가짜 blob 제거됨) ──
     if (inPull && !rt.pullStartCaptured) {
       rt.pullStartCaptured = true;
-
-      // 적 스크린 좌표 캡처 (현재 카메라 기준 — 이후 적 좌표는 lerp)
       for (const t of rt.tracked) {
         const e = enemies[t.idx];
         if (!e || !e.active) continue;
         t.pullSX = e.x - cameraX;
         t.pullSY = e.y - cameraY;
       }
-
-      // dark blob 스폰 — 스크린 전체에 grid + 약간 랜덤
-      const blobGrid = 7; // 7x4 = 28 개
-      const blobRows = 5;
-      const cellW = canvasW / blobGrid;
-      const cellH = canvasH / blobRows;
-      for (let by = 0; by < blobRows; by++) {
-        for (let bx = 0; bx < blobGrid; bx++) {
-          const sx = cellW * (bx + 0.5) + (Math.random() - 0.5) * cellW * 0.4;
-          const sy = cellH * (by + 0.5) + (Math.random() - 0.5) * cellH * 0.4;
-          const dx = sx - rt.centerSX;
-          const dy = sy - rt.centerSY;
-          const dist = Math.hypot(dx, dy);
-          const angle = Math.atan2(dy, dx);
-          const rInit = 46 + Math.random() * 24;
-          rt.blobs.push({
-            sx, sy,
-            r: rInit,
-            initR: rInit,
-            initSX: sx, initSY: sy,
-            spawnFrame: Math.floor(Math.random() * 4),
-            absorbed: false,
-            angle,
-            dist,
-          });
-        }
-      }
     }
 
-    // ── PULL 페이즈 — 적 위치 lerp + blob 위치 spiral 수렴 ──
+    // ── PULL 페이즈 — 실제 적 스프라이트가 스파이럴로 수렴 ──
     if (inPull) {
       const k = fPull / PHASE_PULL;
-      // ease-in (느리게 → 빠르게)
-      const eased = k * k;
+      const eased = k * k; // ease-in (느리게 → 빠르게)
 
-      // 적 이동 (스크린 좌표 lerp → 월드좌표로 다시 변환)
       for (const t of rt.tracked) {
         if (t.absorbed) continue;
         const e = enemies[t.idx];
         if (!e || !e.active) continue;
-        // 보스는 당겨지지 않음 (넉백/슬로우 면역) — 단 collapse 시 fallback 피해는 받음
-        if (isBossType(e.type)) continue;
+        if (isBossType(e.type)) continue; // 보스 면역
 
-        // 스크린상 현재 위치 → 특이점으로 lerp
         const fromSX = t.pullSX;
         const fromSY = t.pullSY;
         const toSX = rt.centerSX;
         const toSY = rt.centerSY;
-        // 소용돌이 각도 추가 (eased 비율로 회전)
         const dx0 = fromSX - toSX;
         const dy0 = fromSY - toSY;
         const baseA = Math.atan2(dy0, dx0);
         const baseR = Math.hypot(dx0, dy0);
         const curR = baseR * (1 - eased);
-        const curA = baseA + eased * Math.PI * 1.3;   // spiral
+        const curA = baseA + eased * Math.PI * 1.3;
         const curSX = toSX + Math.cos(curA) * curR;
         const curSY = toSY + Math.sin(curA) * curR;
 
-        // 월드좌표로 역변환 (현재 cameraX/Y 기준)
         e.x = cameraX + curSX;
         e.y = cameraY + curSY;
+
+        // 찢겨나가는 입자 — 적이 스파이럴 중 몸에서 어둠 파편이 튀는 느낌
+        // 중심에 가까워질수록 빈도 증가
+        const trailChance = 0.35 + eased * 0.55;
+        if (Math.random() < trailChance) {
+          const color = Math.random() < 0.5 ? COL_VIO7 : COL_VIO9;
+          spawnHitParticles(particles, e.x, e.y, color);
+        }
+        if (eased > 0.5 && Math.random() < 0.4) {
+          spawnHitParticles(particles, e.x, e.y, COL_DARK_BLOB);
+        }
 
         // singularity 도달 체크
         if (curR < PULL_ABSORB_DIST) {
@@ -397,24 +356,9 @@ export class AbyssSkill {
           e.stunFrames = Math.max(e.stunFrames ?? 0, isB ? 90 : 2);
           spawnHitParticles(particles, e.x, e.y, COL_VIO5);
           spawnHitParticles(particles, e.x, e.y, COL_VIO3);
-          spawnExplosionParticles(particles, e.x, e.y, COL_VIO7, isB ? 18 : 8);
+          spawnExplosionParticles(particles, e.x, e.y, COL_VIO7, isB ? 18 : 12);
+          spawnExplosionParticles(particles, e.x, e.y, COL_VIO9, 8);
           if (e.hp <= 0) onKill(t.idx);
-        }
-      }
-
-      // blob 이동 — spiral 수렴 (같은 공식)
-      for (const b of rt.blobs) {
-        if (b.absorbed) continue;
-        if (fPull < b.spawnFrame) continue;
-        const localK = Math.min(1, (fPull - b.spawnFrame) / (PHASE_PULL - b.spawnFrame));
-        const eK = localK * localK;
-        const curR = b.dist * (1 - eK);
-        const curA = b.angle + eK * Math.PI * 1.5;
-        b.sx = rt.centerSX + Math.cos(curA) * curR;
-        b.sy = rt.centerSY + Math.sin(curA) * curR;
-        b.r = b.initR * (1 - eK * 0.7);
-        if (curR < PULL_ABSORB_DIST + 4) {
-          b.absorbed = true;
         }
       }
     }
@@ -434,7 +378,7 @@ export class AbyssSkill {
       rt.lensStrength = 0;
     } else if (inPull) {
       const k = fPull / PHASE_PULL;
-      // base dark alpha 감소 (blob 들이 대신 시각 전달)
+      // base dark alpha 감소 (적 스파이럴이 시각 전달)
       rt.darkAlpha = 0.88 * (1 - k * 0.85);
       rt.singularityR = 8 + 12 * k;
       rt.singularityBright = 0.6 + 0.35 * k;
@@ -471,8 +415,7 @@ export class AbyssSkill {
         e.hp -= isB ? DMG_BOSS : DMG_REG;
         if (e.hp <= 0) onKill(t.idx);
       }
-      // 모든 blob absorb 처리
-      for (const b of rt.blobs) b.absorbed = true;
+      // (가짜 blob 제거됨 — 실제 적만 이 시점에서 collapse 처리)
     }
 
     // uniform 주입 (lens center 는 스크린 좌표 고정)
@@ -497,7 +440,6 @@ export class AbyssSkill {
 
   private clearGfx() {
     this.darkGfx.clear();
-    this.blobGfx.clear();
     this.horizonGfx.clear();
     this.coreGfx.clear();
     this.coreGlowGfx.clear();
@@ -514,21 +456,7 @@ export class AbyssSkill {
       this.darkGfx.endFill();
     }
 
-    // ── dark blobs (pull 중 수렴) ──
-    for (const b of rt.blobs) {
-      if (b.absorbed) continue;
-      if (b.r <= 0.3) continue;
-      // 3겹 레이어: void 중심 + dark purple outer + fuzz
-      this.blobGfx.beginFill(COL_VOID, 0.92);
-      this.blobGfx.drawCircle(b.sx, b.sy, b.r);
-      this.blobGfx.endFill();
-      this.blobGfx.beginFill(COL_DARK_BLOB, 0.72);
-      this.blobGfx.drawCircle(b.sx, b.sy, b.r * 1.3);
-      this.blobGfx.endFill();
-      this.blobGfx.beginFill(COL_VIO9, 0.36);
-      this.blobGfx.drawCircle(b.sx, b.sy, b.r * 1.6);
-      this.blobGfx.endFill();
-    }
+    // (가짜 dark blob 렌더 제거됨 — 실제 적 스프라이트가 수렴 연출)
 
     // ── singularity core ──
     if (rt.singularityR > 0.2) {
@@ -570,28 +498,7 @@ export class AbyssSkill {
       }
     }
 
-    // ── collapse flash ──
-    if (rt.collapsed) {
-      const fC = rt.frame - (PHASE_DARKEN + PHASE_HOLD + PHASE_PULL);
-      const total = PHASE_COLLAPSE + PHASE_RESTORE;
-      if (fC < total) {
-        const k = 1 - fC / total;
-        // 첫 5f 는 강한 전체 flash
-        if (fC < 5) {
-          const pk = 1 - fC / 5;
-          this.flashGfx.beginFill(COL_WHITE_HI, 0.65 * pk);
-          this.flashGfx.drawRect(0, 0, rt.canvasW, rt.canvasH);
-          this.flashGfx.endFill();
-        }
-        // 이후 radial flash (서서히 감쇠)
-        this.flashGfx.beginFill(COL_VIO3, 0.3 * k);
-        this.flashGfx.drawCircle(rt.centerSX, rt.centerSY, 200 + fC * 12);
-        this.flashGfx.endFill();
-        this.flashGfx.beginFill(COL_VIO7, 0.22 * k);
-        this.flashGfx.drawCircle(rt.centerSX, rt.centerSY, 80 + fC * 6);
-        this.flashGfx.endFill();
-      }
-    }
+    // collapse flash 제거됨 (전화면 white flash + radial purple flash 전부 삭제)
   }
 
   destroy() {
@@ -601,7 +508,6 @@ export class AbyssSkill {
       this.filter = null;
     }
     this.darkGfx.destroy();
-    this.blobGfx.destroy();
     this.horizonGfx.destroy();
     this.coreGfx.destroy();
     this.coreGlowGfx.destroy();

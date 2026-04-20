@@ -476,7 +476,7 @@ export class GameEngine {
       this.earthquakeSkill.start(this.state.player.x, this.state.player.y);
       slot.cooldown = slot.maxCooldown;
     } else if (id === 'electric_storm') {
-      this.thunderStormSkill.start(CANVAS_W, CANVAS_H);
+      this.thunderStormSkill.start(this.state.cameraX, this.state.cameraY, CANVAS_W, CANVAS_H);
       slot.cooldown = slot.maxCooldown;
     } else if (id === 'light_judgment') {
       this.lightJudgmentSkill.start(
@@ -534,7 +534,7 @@ export class GameEngine {
       );
     }
 
-    // 흙 스킬 업데이트 + 균열/기둥 판정
+    // 흙 스킬 업데이트 + 균열 + 3연타 폭발 판정
     if (this.earthquakeSkill.isActive()) {
       this.earthquakeSkill.update(
         1,

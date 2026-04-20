@@ -46,11 +46,7 @@ const INFERNO_FRAG = [
   '  vec3 warm = vec3(0.55, 0.18, 0.06);',
   '  color.rgb = mix(color.rgb, color.rgb * (1.0 - 0.55 * s) + warm * depth * s * 0.55, s);',
   '',
-  '  // 폭발 적열 — 전체 화면 red-orange 브라이트',
-  '  if (uBrightness > 0.001) {',
-  '    vec3 hot = vec3(0.98, 0.36, 0.08);',
-  '    color.rgb = mix(color.rgb, color.rgb + hot, uBrightness * 0.55);',
-  '  }',
+  '  // 폭발 brightness 플래시 제거됨',
   '',
   '  gl_FragColor = color;',
   '}',
@@ -472,13 +468,7 @@ export class InfernoSkill {
       }
     }
 
-    // ── 스크린 오버레이 (flash) — 폭발 밝기에 비례 ──
-    if (rt.brightness > 0.05) {
-      const col = lerpHotColor(0.2 + (1 - rt.brightness) * 0.4);
-      this.screenOverlay.beginFill(col, rt.brightness * 0.18);
-      this.screenOverlay.drawRect(0, 0, CANVAS_W, CANVAS_H);
-      this.screenOverlay.endFill();
-    }
+    // 전화면 screenOverlay flash 제거됨
   }
 
   destroy() {

@@ -1,203 +1,164 @@
 import * as PIXI from 'pixi.js';
-import { EnemyState, ParticleState, CANVAS_W, CANVAS_H } from '../types';
+import { EnemyState, ParticleState } from '../types';
 import { isBossType } from '../types';
-import { spawnHitParticles, spawnExplosionParticles } from '../particles';
+import { spawnHitParticles } from '../particles';
 
 /**
  * 빛 액티브 스킬 — 심판광 (Final Judgment)
  *
- * 컨셉: 화면 전체가 서서히 밝아지며, 살아있는 적 각각의 머리 위에 빛의 십자가 마커가
- *       순차 생성된다. 차징이 끝나는 순간 모든 적에게 동시에 수직 광선이 강림하고,
- *       화면은 색상 반전(홀리 모드) 후 서서히 복귀한다.
+ * 컨셉:
+ *   - GATHER → 적 머리 위에 금빛 십자가 마커 순차 스폰 (차징 광점이 주변에서 모여듦)
+ *   - MARK → 마커 유지 (적 추적) — 입자 모이기 지속
+ *   - VERDICT → 각 마커에서 **입자 폭발** (LightUltimate hit 패턴의 역 — 모였던 빛이 사방 분출)
+ *       + 작은 중앙 플래시 오브 + 트레일 있는 burst particle 48개
+ *   - FADE → 잔영 페이드
  *
- * 타 스킬과의 차별점:
- *   - 뇌전폭풍 : 시간차 무작위 난타 + chain 전이
- *   - 심판광   : 동시 전체 타격 (일제 판정, chain 없음, 마커→집행 의식감)
+ * 설계 원칙:
+ *   - 빛 속성 = "입자 모이기 → 반대로 분출" (사용자 피드백)
+ *   - 흰 배경 대응: 밝은 gold/yellow/cream 주조, amber-700 로만 외곽 대비
+ *   - GLSL/screenFlash/수직빔 전부 제거, 원형 크레이터·wavy ring 제거
+ *   - LightUltimateEffect spawnHitEffect 패턴 차용 (32개 입자 + 트레일)
  *
- * 좌표계:
- *   - 마커: 월드 좌표 (적 추적) — worldWrap 내부
- *   - 빔:   Verdict 시점 고정 좌표 (적 죽어도 유지) — worldWrap
- *   - GLSL: groundLayer — uBrightness + uInvert
+ * 좌표계: 월드좌표 worldWrap (overlayLayer, -camera 시프트)
  */
 
-const JUDGMENT_FRAG = [
-  'varying vec2 vTextureCoord;',
-  'uniform sampler2D uSampler;',
-  'uniform float uBrightness;',   // 0..1 밝기',
-  'uniform float uInvert;',        // 0..1 색상 반전',
-  'uniform float uRadiate;',       // 0..1 상단 방사',
-  'uniform vec2 uTexSize;',
-  '',
-  'void main(void) {',
-  '  vec4 color = texture2D(uSampler, vTextureCoord);',
-  '  vec2 pix = vTextureCoord * uTexSize;',
-  '',
-  '  // 상단에서 쏟아지는 빛 — y 작을수록 강함',
-  '  float top = 1.0 - smoothstep(0.0, uTexSize.y * 0.85, pix.y);',
-  '  vec3 radCol = vec3(1.0, 0.97, 0.82);',
-  '  color.rgb = mix(color.rgb, color.rgb + radCol, top * uRadiate * 0.35);',
-  '',
-  '  // 전체 밝기',
-  '  vec3 warm = vec3(1.0, 0.96, 0.78);',
-  '  color.rgb = mix(color.rgb, color.rgb + warm * 0.55, uBrightness);',
-  '  color.rgb = clamp(color.rgb, 0.0, 1.0);',
-  '',
-  '  // 색상 반전 (홀리 모드)',
-  '  color.rgb = mix(color.rgb, vec3(1.0) - color.rgb, uInvert);',
-  '',
-  '  gl_FragColor = color;',
-  '}',
-].join('\n');
+// ── 팔레트 (LightUltimate 과 동일 — 순수 골드/노랑, 흰 배경에서 amber-700 로 대비) ──
+const COL_AMBER_DEEP   = 0xb45309; // amber-700 (흰 배경 대비 외곽)
+const COL_AMBER_MAIN   = 0xd97706; // amber-600
+const COL_AMBER_BRIGHT = 0xf59e0b; // amber-500
+const COL_AMBER_LIGHT  = 0xfbbf24; // amber-400
+const COL_GOLD_MAIN    = 0xeab308; // yellow-500
+const COL_GOLD_BRIGHT  = 0xfde047; // yellow-300
+const COL_GOLD_LIGHT   = 0xfef08a; // yellow-200
+const COL_CREAM        = 0xfef9c3; // yellow-100
+const COL_NEAR_WHITE   = 0xfffef5; // 거의 흰색 (코어 핀포인트)
 
-// 팔레트 (holy light)
-const COL_WHITE     = 0xffffff;
-const COL_AMBER1    = 0xfef3c7; // amber-100
-const COL_AMBER2    = 0xfde68a; // amber-200
-const COL_YEL3      = 0xfde047; // yellow-300
-const COL_YEL4      = 0xfacc15; // yellow-400
-const COL_AMBER4    = 0xfbbf24; // amber-400
-const COL_ORANGE3   = 0xfdba74; // orange-300 (halo)
-const COL_AMBER7    = 0xb45309; // amber-700 (룬 dark stroke)
+// ── 페이즈 — MARK/VERDICT 는 적 수에 따라 동적 계산 (순차 진행 느낌) ──
+const PHASE_GATHER      = 20;             // 0.33s 초반 차징 리드
+const PHASE_FADE        = 24;             // 0.40s 잔영
+const MARKER_SPACING    = 8;              // 마커 간 스폰 간격 (0.13s)
+const EXPLOSION_SPACING = 10;             // 폭발 간 발동 간격 (0.17s)
+const PHASE_MARK_BASE   = 18;             // 마지막 마커 + 이 만큼 추가 유지
+const PHASE_VERDICT_TAIL = 30;            // 마지막 폭발 + 파티클 잔여 시간
+const PHASE_MARK_MIN    = 36;
+const PHASE_MARK_MAX    = 180;            // 최대 3s
+const PHASE_VERDICT_MIN = 44;
+const PHASE_VERDICT_MAX = 220;            // 최대 3.7s
 
-// ── 페이즈 ──
-const PHASE_GATHER  = 30;   // 0.50s
-const PHASE_MARK    = 36;   // 0.60s
-const PHASE_VERDICT = 18;   // 0.30s
-const PHASE_INVERT  = 36;   // 0.60s
-const PHASE_FADE    = 18;   // 0.30s
-const PHASE_TOTAL   = PHASE_GATHER + PHASE_MARK + PHASE_VERDICT + PHASE_INVERT + PHASE_FADE; // 138
+// ── 판정 ──
+const DMG_REG    = 500;
+const DMG_BOSS   = 260;
+const BOSS_STUN  = 120;
+const REG_STUN   = 40;
+const HIT_RADIUS = 88;
 
-// 판정
-const DMG_REG  = 500;        // 일반 적 사실상 즉사
-const DMG_BOSS = 260;
-const BOSS_STUN = 120;       // 2초 스턴
-const BEAM_CORE_W = 8;
-const BEAM_GLOW_W = 26;
-const BEAM_HALO_W = 64;
+// ── 폭발 시각 ──
+const BURST_COUNT      = 48;    // 폭발당 입자 수 (LightUltimate 32 보다 증강)
+const BURST_SPEED_MIN  = 4;
+const BURST_SPEED_MAX  = 11;
+const BURST_LIFE_MIN   = 22;
+const BURST_LIFE_MAX   = 42;
+const BURST_SIZE_MIN   = 1.4;
+const BURST_SIZE_MAX   = 3.2;
+const CORE_FLASH_LIFE  = 14;    // 중앙 플래시 오브 수명 (입자 수명보다 짧게)
+
+// ── 모이는 차징 광점 (GATHER + MARK 동안 마커 주변으로 수렴) ──
+const CHARGE_PER_MARKER = 3;    // spawn 주기 rate 느낌 (실제는 timer 기반)
+const CHARGE_SPAWN_INTERVAL = 3;   // frames
+const CHARGE_SPAWN_RADIUS = 70;    // 마커 주변 spawn 반경
+const CHARGE_ABSORB_SPEED = 1.9;   // 수렴 속도
 
 interface Marker {
   enemyIdx: number;
-  spawnFrame: number;   // Mark 페이즈 기준 프레임
-  lockedWX: number;     // 최초 적 위치 (적이 움직이면 추적하지만 fallback 용)
+  markerIdx: number;       // 거리순 정렬 후의 인덱스 (k)
+  spawnFrame: number;      // MARK 페이즈 기준 스폰 오프셋
+  fireDelay: number;       // VERDICT 페이즈 기준 폭발 발동 딜레이
+  lockedWX: number;
   lockedWY: number;
-  alive: boolean;
+  fired: boolean;          // 폭발 발동됨
 }
 
-interface Beam {
-  wx: number;           // 빔의 월드 x (Verdict 시 고정)
-  wy: number;           // 적 중심 월드 y (화면상 빔 파괴 표시용)
-  start: number;        // Verdict 시작 프레임 기준 (0)
+interface BurstParticle {
+  wx: number; wy: number;       // 월드 좌표
+  prevWX: number; prevWY: number;
+  vx: number; vy: number;
+  life: number;
+  maxLife: number;
+  size: number;
+  color: number;
+}
+
+interface Explosion {
+  wx: number; wy: number;
+  birthFrame: number;
+  particles: BurstParticle[];
+  seed: number;
+}
+
+interface ChargeParticle {
+  markerIdx: number;            // 소속 마커 (폭발 시 정리용)
+  mx: number; my: number;       // 목적지 (마커 위치)
+  wx: number; wy: number;
+  prevWX: number; prevWY: number;
+  size: number;
+  color: number;
+  spinBias: number;
+  speed: number;
 }
 
 interface JudgmentRuntime {
   frame: number;
   markers: Marker[];
-  beams: Beam[];
+  explosions: Explosion[];
+  charges: ChargeParticle[];
+  chargeTimer: number;
   active: boolean;
-
-  brightness: number;   // uBrightness
-  invert: number;       // uInvert
-  radiate: number;      // uRadiate
-
-  verdictFired: boolean;
+  // 동적 페이즈 타이밍
+  tMarkStart: number;
+  tVerdictStart: number;
+  tFadeStart: number;
+  totalFrames: number;
 }
 
 export class LightJudgmentSkill {
   private overlayLayer: PIXI.Container;
-  private groundLayer: PIXI.Container;
 
   private worldWrap: PIXI.Container;
-  private markerGfx: PIXI.Graphics;
-  private markerGlowGfx: PIXI.Graphics;
-  private beamCoreGfx: PIXI.Graphics;
-  private beamGlowGfx: PIXI.Graphics;
-  private beamHaloGfx: PIXI.Graphics;
-  private beamBaseGfx: PIXI.Graphics;   // 지면 타격 링
+  private chargeGfx: PIXI.Graphics;     // 모여드는 차징 입자 + 트레일 (최하위)
+  private burstGfx: PIXI.Graphics;      // 폭발 파티클 + 중앙 플래시 오브
+  private markerGfx: PIXI.Graphics;     // 십자가 마커 (최상단)
 
-  private screenGfx: PIXI.Graphics;     // 화면 전체 오버레이 (스크린 좌표)
-
-  private filter: PIXI.Filter | null = null;
   private runtime: JudgmentRuntime | null = null;
   private time = 0;
 
-  constructor(overlayLayer: PIXI.Container, groundLayer: PIXI.Container) {
+  constructor(overlayLayer: PIXI.Container, _groundLayer: PIXI.Container) {
     this.overlayLayer = overlayLayer;
-    this.groundLayer = groundLayer;
+    void _groundLayer;
 
     this.worldWrap = new PIXI.Container();
     this.overlayLayer.addChild(this.worldWrap);
 
-    // 빔은 아래 레이어 (halo→glow→core)
-    this.beamHaloGfx = new PIXI.Graphics();
-    this.beamHaloGfx.blendMode = PIXI.BLEND_MODES.ADD;
-    this.worldWrap.addChild(this.beamHaloGfx);
+    this.chargeGfx = new PIXI.Graphics();
+    this.worldWrap.addChild(this.chargeGfx);
 
-    this.beamGlowGfx = new PIXI.Graphics();
-    this.beamGlowGfx.blendMode = PIXI.BLEND_MODES.ADD;
-    this.worldWrap.addChild(this.beamGlowGfx);
-
-    this.beamBaseGfx = new PIXI.Graphics();
-    this.beamBaseGfx.blendMode = PIXI.BLEND_MODES.ADD;
-    this.worldWrap.addChild(this.beamBaseGfx);
-
-    this.beamCoreGfx = new PIXI.Graphics();
-    this.worldWrap.addChild(this.beamCoreGfx);
-
-    this.markerGlowGfx = new PIXI.Graphics();
-    this.markerGlowGfx.blendMode = PIXI.BLEND_MODES.ADD;
-    this.worldWrap.addChild(this.markerGlowGfx);
+    this.burstGfx = new PIXI.Graphics();
+    this.worldWrap.addChild(this.burstGfx);
 
     this.markerGfx = new PIXI.Graphics();
     this.worldWrap.addChild(this.markerGfx);
-
-    this.screenGfx = new PIXI.Graphics();
-    this.screenGfx.blendMode = PIXI.BLEND_MODES.ADD;
-    this.overlayLayer.addChild(this.screenGfx);
   }
 
   isActive(): boolean {
     return this.runtime !== null && this.runtime.active;
   }
 
-  private ensureFilter() {
-    if (this.filter) return;
-    this.filter = new PIXI.Filter(undefined, JUDGMENT_FRAG, {
-      uBrightness: 0,
-      uInvert: 0,
-      uRadiate: 0,
-      uTexSize: [CANVAS_W, CANVAS_H],
-    });
-    this.filter.padding = 0;
-    const f = this.filter;
-    f.apply = function (fm: any, input: any, output: any, clearMode: any) {
-      if (input && input.width > 0) {
-        f.uniforms.uTexSize = [input.width, input.height];
-      }
-      fm.applyFilter(f, input, output, clearMode);
-    };
-  }
-
-  private attachFilter() {
-    if (!this.filter) return;
-    this.groundLayer.filterArea = new PIXI.Rectangle(0, 0, CANVAS_W, CANVAS_H);
-    const existing = this.groundLayer.filters || [];
-    if (!existing.includes(this.filter)) {
-      this.groundLayer.filters = [...existing, this.filter];
-    }
-  }
-
-  private detachFilter() {
-    if (!this.filter || !this.groundLayer.filters) return;
-    this.groundLayer.filters = this.groundLayer.filters.filter((f) => f !== this.filter);
-  }
-
   start(enemies: EnemyState[], cameraX: number, cameraY: number, canvasW: number, canvasH: number) {
     if (this.runtime && this.runtime.active) return;
-    this.ensureFilter();
-    this.attachFilter();
 
-    // 스크린 내 살아있는 적만 대상
-    const candidates: number[] = [];
+    // 현재 화면 내 살아있는 적 수집
+    const candidates: Array<{ idx: number; dist2: number; x: number; y: number }> = [];
+    const centerWX = cameraX + canvasW / 2;
+    const centerWY = cameraY + canvasH / 2;
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       if (!e.active) continue;
@@ -205,36 +166,54 @@ export class LightJudgmentSkill {
       const sy = e.y - cameraY;
       if (sx < -30 || sx > canvasW + 30) continue;
       if (sy < -30 || sy > canvasH + 30) continue;
-      candidates.push(i);
+      const dx = e.x - centerWX;
+      const dy = e.y - centerWY;
+      candidates.push({ idx: i, dist2: dx * dx + dy * dy, x: e.x, y: e.y });
+    }
+    // 가까운 적부터 정렬 (착-착-착 순서)
+    candidates.sort((a, b) => a.dist2 - b.dist2);
+
+    const n = candidates.length;
+    // 동적 페이즈 계산 — 마지막 마커/폭발까지 충분히 시간 확보
+    const lastSpawn = n > 0 ? (n - 1) * MARKER_SPACING : 0;
+    const lastFire  = n > 0 ? (n - 1) * EXPLOSION_SPACING : 0;
+    const phaseMark = Math.max(PHASE_MARK_MIN, Math.min(PHASE_MARK_MAX, lastSpawn + PHASE_MARK_BASE));
+    const phaseVerdict = Math.max(PHASE_VERDICT_MIN, Math.min(PHASE_VERDICT_MAX, lastFire + PHASE_VERDICT_TAIL));
+
+    // MARK 페이즈 내 간격 재조정 (상한에 걸렸을 경우 조밀하게)
+    const markerSpacing = n > 1 ? Math.min(MARKER_SPACING, (phaseMark - PHASE_MARK_BASE) / (n - 1)) : 0;
+    const explosionSpacing = n > 1 ? Math.min(EXPLOSION_SPACING, (phaseVerdict - PHASE_VERDICT_TAIL) / (n - 1)) : 0;
+
+    const markers: Marker[] = [];
+    for (let k = 0; k < n; k++) {
+      const c = candidates[k];
+      markers.push({
+        enemyIdx: c.idx,
+        markerIdx: k,
+        spawnFrame: Math.floor(k * markerSpacing),
+        fireDelay: Math.floor(k * explosionSpacing),
+        lockedWX: c.x,
+        lockedWY: c.y,
+        fired: false,
+      });
     }
 
-    // 마커 생성 — 순차 스폰 간격은 MARK 페이즈 내 균등 분배
-    const markers: Marker[] = [];
-    const n = candidates.length;
-    if (n > 0) {
-      for (let k = 0; k < n; k++) {
-        const idx = candidates[k];
-        const e = enemies[idx];
-        const spawnFrame = Math.floor((k / n) * (PHASE_MARK - 4));
-        markers.push({
-          enemyIdx: idx,
-          spawnFrame,
-          lockedWX: e.x,
-          lockedWY: e.y,
-          alive: true,
-        });
-      }
-    }
+    const tMarkStart = PHASE_GATHER;
+    const tVerdictStart = tMarkStart + phaseMark;
+    const tFadeStart = tVerdictStart + phaseVerdict;
+    const totalFrames = tFadeStart + PHASE_FADE;
 
     this.runtime = {
       frame: 0,
       markers,
-      beams: [],
+      explosions: [],
+      charges: [],
+      chargeTimer: 0,
       active: true,
-      brightness: 0,
-      invert: 0,
-      radiate: 0,
-      verdictFired: false,
+      tMarkStart,
+      tVerdictStart,
+      tFadeStart,
+      totalFrames,
     };
     this.time = 0;
   }
@@ -251,6 +230,7 @@ export class LightJudgmentSkill {
   ) {
     const rt = this.runtime;
     if (!rt || !rt.active) return;
+    void canvasW; void canvasH;
 
     this.time += dt;
     rt.frame += dt;
@@ -259,274 +239,328 @@ export class LightJudgmentSkill {
     this.worldWrap.y = -cameraY;
 
     const f = rt.frame;
-    const inGather  = f < PHASE_GATHER;
-    const inMark    = f >= PHASE_GATHER && f < PHASE_GATHER + PHASE_MARK;
-    const inVerdict = f >= PHASE_GATHER + PHASE_MARK && f < PHASE_GATHER + PHASE_MARK + PHASE_VERDICT;
-    const inInvert  = f >= PHASE_GATHER + PHASE_MARK + PHASE_VERDICT && f < PHASE_GATHER + PHASE_MARK + PHASE_VERDICT + PHASE_INVERT;
-    const inFade    = f >= PHASE_GATHER + PHASE_MARK + PHASE_VERDICT + PHASE_INVERT;
 
-    const fVerdict = Math.max(0, f - (PHASE_GATHER + PHASE_MARK));
-    const fInvert  = Math.max(0, f - (PHASE_GATHER + PHASE_MARK + PHASE_VERDICT));
-    const fFade    = Math.max(0, f - (PHASE_GATHER + PHASE_MARK + PHASE_VERDICT + PHASE_INVERT));
-
-    // uniform schedule
-    if (inGather) {
-      rt.radiate = f / PHASE_GATHER;
-      rt.brightness = 0.35 * (f / PHASE_GATHER);
-    } else if (inMark) {
-      rt.radiate = 1;
-      const k = (f - PHASE_GATHER) / PHASE_MARK;
-      rt.brightness = 0.35 + 0.35 * k;
-    } else if (inVerdict) {
-      rt.radiate = 1;
-      rt.brightness = 0.70 + 0.25 * Math.min(1, fVerdict / 6);  // 0.70 → 0.95
-    } else if (inInvert) {
-      rt.brightness = Math.max(0, 0.95 - 0.85 * (fInvert / PHASE_INVERT));
-      rt.invert = fInvert < PHASE_INVERT * 0.6
-        ? (fInvert / (PHASE_INVERT * 0.6))
-        : Math.max(0, 1 - (fInvert - PHASE_INVERT * 0.6) / (PHASE_INVERT * 0.4));
-      rt.radiate = Math.max(0, 1 - fInvert / PHASE_INVERT);
-    } else if (inFade) {
-      const k = 1 - fFade / PHASE_FADE;
-      rt.brightness = 0.1 * Math.max(0, k);
-      rt.invert = 0;
-      rt.radiate = 0;
-    }
-
-    // Mark 페이즈 — 마커 활성 여부만 갱신 (렌더 단계에서 spawn 판정)
-    // 적이 죽으면 marker.alive = false, but beam 은 여전히 생성
-
-    // Verdict 시작 순간 — 한 번만 실행
-    if (inVerdict && !rt.verdictFired) {
-      rt.verdictFired = true;
-      // 모든 마커 위치에 빔 생성 + 대미지 적용
+    // 1) 차징 입자 spawn — 각 마커에 대해, 스폰된 후 ~폭발 직전까지 주변에서 수렴
+    rt.chargeTimer -= dt;
+    if (rt.chargeTimer <= 0) {
+      rt.chargeTimer = CHARGE_SPAWN_INTERVAL;
       for (const m of rt.markers) {
-        // marker의 현재 추적 위치 (적이 살아있으면 그 좌표, 죽었으면 lock)
+        if (m.fired) continue;
+        const absSpawn = rt.tMarkStart + m.spawnFrame;
+        const absFire  = rt.tVerdictStart + m.fireDelay;
+        // 마커 등장 직전~폭발 직전 사이만 차징
+        if (f < absSpawn - 6) continue;
+        if (f > absFire - 4) continue;
+
         const e = enemies[m.enemyIdx];
-        let wx: number, wy: number;
-        if (e && e.active) {
-          wx = e.x;
-          wy = e.y;
-        } else {
-          wx = m.lockedWX;
-          wy = m.lockedWY;
+        const mx = (e && e.active) ? e.x : m.lockedWX;
+        const my = ((e && e.active) ? e.y : m.lockedWY) - 32;
+
+        const n = 1 + Math.floor(Math.random() * CHARGE_PER_MARKER);
+        for (let k = 0; k < n; k++) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = CHARGE_SPAWN_RADIUS * (0.65 + Math.random() * 0.45);
+          const sx = mx + Math.cos(angle) * dist;
+          const sy = my + Math.sin(angle) * dist;
+          const colors = [COL_AMBER_MAIN, COL_AMBER_LIGHT, COL_GOLD_BRIGHT, COL_GOLD_LIGHT, COL_CREAM];
+          rt.charges.push({
+            markerIdx: m.markerIdx,
+            mx, my,
+            wx: sx, wy: sy,
+            prevWX: sx, prevWY: sy,
+            size: 1.2 + Math.random() * 1.6,
+            color: colors[Math.floor(Math.random() * colors.length)],
+            spinBias: (Math.random() < 0.5 ? -1 : 1) * (0.6 + Math.random() * 0.7),
+            speed: CHARGE_ABSORB_SPEED * (0.85 + Math.random() * 0.5),
+          });
         }
-        rt.beams.push({ wx, wy, start: fVerdict });
-
-        // 대미지 (그 시점 범위 내 적)
-        this.dealBeamDamage(wx, enemies, particles, onKill);
-
-        // 폭발 파티클
-        spawnExplosionParticles(particles, wx, wy, COL_AMBER2, 12);
-        spawnExplosionParticles(particles, wx, wy, COL_YEL3, 6);
       }
     }
 
-    // uniform 주입
-    if (this.filter) {
-      this.filter.uniforms.uBrightness = rt.brightness;
-      this.filter.uniforms.uInvert = rt.invert;
-      this.filter.uniforms.uRadiate = rt.radiate;
+    // 2) 차징 입자 수렴 (목적지 도달 시 제거)
+    for (let i = rt.charges.length - 1; i >= 0; i--) {
+      const p = rt.charges[i];
+      p.prevWX = p.wx;
+      p.prevWY = p.wy;
+
+      const dx = p.mx - p.wx;
+      const dy = p.my - p.wy;
+      const d = Math.hypot(dx, dy);
+      if (d < 4) { rt.charges.splice(i, 1); continue; }
+
+      const nx = dx / d;
+      const ny = dy / d;
+      const tx = -ny * p.spinBias;
+      const ty =  nx * p.spinBias;
+      const closeBoost = 1 + Math.max(0, (CHARGE_SPAWN_RADIUS - d) / 80);
+      const radSpeed = p.speed * closeBoost;
+      const tanSpeed = 0.35 + (CHARGE_SPAWN_RADIUS - d) / 100;
+      p.wx += (nx * radSpeed + tx * tanSpeed) * dt;
+      p.wy += (ny * radSpeed + ty * tanSpeed) * dt;
     }
 
-    // 종료
-    if (rt.frame >= PHASE_TOTAL) {
+    // 3) Verdict — 마커별로 fireDelay 에 맞춰 순차 폭발 (가까운 적부터)
+    if (f >= rt.tVerdictStart) {
+      for (const m of rt.markers) {
+        if (m.fired) continue;
+        const absFire = rt.tVerdictStart + m.fireDelay;
+        if (f < absFire) continue;
+        m.fired = true;
+
+        const e = enemies[m.enemyIdx];
+        let wx: number, wy: number;
+        if (e && e.active) { wx = e.x; wy = e.y; }
+        else { wx = m.lockedWX; wy = m.lockedWY; }
+
+        const explosion: Explosion = {
+          wx, wy,
+          birthFrame: f,
+          particles: [],
+          seed: Math.random() * 100,
+        };
+        this.spawnBurstParticles(explosion, wx, wy);
+        rt.explosions.push(explosion);
+
+        this.dealRadialDamage(wx, wy, enemies, particles, onKill);
+
+        // 해당 마커의 남은 차징 입자 제거 (바로 폭발로 전환된 느낌)
+        rt.charges = rt.charges.filter((c) => c.markerIdx !== m.markerIdx);
+      }
+    }
+
+    // 4) 폭발 파티클 업데이트 (트레일 + drag + life)
+    for (const ex of rt.explosions) {
+      for (let i = ex.particles.length - 1; i >= 0; i--) {
+        const p = ex.particles[i];
+        p.prevWX = p.wx;
+        p.prevWY = p.wy;
+        p.wx += p.vx * dt;
+        p.wy += p.vy * dt;
+        p.vx *= 0.92;
+        p.vy *= 0.92;
+        p.life -= dt;
+        if (p.life <= 0) {
+          ex.particles.splice(i, 1);
+        }
+      }
+    }
+
+    // 5) 종료
+    if (rt.frame >= rt.totalFrames) {
       rt.active = false;
-      this.detachFilter();
       this.clearGfx();
       return;
     }
 
-    this.render(rt, enemies, cameraX, cameraY, canvasW, canvasH, fVerdict, inInvert);
+    this.render(rt, enemies);
   }
 
-  /** 수직 빔 x=wx 전체 세로 통과 — 해당 세로 라인 ±BEAM_GLOW_W 에 있는 적 타격 */
-  private dealBeamDamage(
-    wx: number,
+  /** 폭발 파티클 48개 spawn — LightUltimate spawnHitEffect 의 확장판 */
+  private spawnBurstParticles(ex: Explosion, wx: number, wy: number) {
+    const colors = [
+      COL_AMBER_MAIN,
+      COL_AMBER_BRIGHT,
+      COL_AMBER_LIGHT,
+      COL_GOLD_MAIN,
+      COL_GOLD_BRIGHT,
+      COL_GOLD_LIGHT,
+      COL_CREAM,
+      COL_NEAR_WHITE,
+    ];
+    for (let i = 0; i < BURST_COUNT; i++) {
+      const angle = (i / BURST_COUNT) * Math.PI * 2 + Math.random() * 0.45;
+      const speed = BURST_SPEED_MIN + Math.random() * (BURST_SPEED_MAX - BURST_SPEED_MIN);
+      const life = BURST_LIFE_MIN + Math.random() * (BURST_LIFE_MAX - BURST_LIFE_MIN);
+      const size = BURST_SIZE_MIN + Math.random() * (BURST_SIZE_MAX - BURST_SIZE_MIN);
+      const color = colors[Math.floor(Math.random() * colors.length)];
+      ex.particles.push({
+        wx, wy,
+        prevWX: wx, prevWY: wy,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life, maxLife: life,
+        size,
+        color,
+      });
+    }
+  }
+
+  private dealRadialDamage(
+    wx: number, wy: number,
     enemies: EnemyState[],
     particles: ParticleState[],
     onKill: (idx: number) => void,
   ) {
-    const halfW = BEAM_GLOW_W * 1.4;
+    const r2 = HIT_RADIUS * HIT_RADIUS;
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       if (!e.active) continue;
-      const dx = Math.abs(e.x - wx);
-      if (dx > halfW) continue;
+      const dx = e.x - wx;
+      const dy = e.y - wy;
+      if (dx * dx + dy * dy > r2) continue;
       const isB = isBossType(e.type);
       e.hp -= isB ? DMG_BOSS : DMG_REG;
-      e.stunFrames = Math.max(e.stunFrames ?? 0, isB ? BOSS_STUN : 40);
-      spawnHitParticles(particles, e.x, e.y, COL_AMBER2);
-      spawnHitParticles(particles, e.x, e.y, COL_YEL4);
+      e.stunFrames = Math.max(e.stunFrames ?? 0, isB ? BOSS_STUN : REG_STUN);
+      spawnHitParticles(particles, e.x, e.y, COL_GOLD_BRIGHT);
+      spawnHitParticles(particles, e.x, e.y, COL_GOLD_LIGHT);
+      spawnHitParticles(particles, e.x, e.y, COL_CREAM);
       if (e.hp <= 0) onKill(i);
     }
   }
 
   private clearGfx() {
     this.markerGfx.clear();
-    this.markerGlowGfx.clear();
-    this.beamCoreGfx.clear();
-    this.beamGlowGfx.clear();
-    this.beamHaloGfx.clear();
-    this.beamBaseGfx.clear();
-    this.screenGfx.clear();
+    this.burstGfx.clear();
+    this.chargeGfx.clear();
   }
 
-  private render(
-    rt: JudgmentRuntime,
-    enemies: EnemyState[],
-    cameraX: number,
-    cameraY: number,
-    canvasW: number,
-    canvasH: number,
-    fVerdict: number,
-    inInvert: boolean,
-  ) {
+  private render(rt: JudgmentRuntime, enemies: EnemyState[]) {
     this.clearGfx();
-    void canvasW;
 
+    const t = this.time;
     const f = rt.frame;
-    const inMark = f >= PHASE_GATHER && f < PHASE_GATHER + PHASE_MARK;
-    const fMark = f - PHASE_GATHER;
 
-    // ── 마커 (빛의 십자가) ──
-    if (inMark || (f >= PHASE_GATHER + PHASE_MARK && fVerdict < 3)) {
-      for (const m of rt.markers) {
-        // marker 활성 여부 — spawnFrame 이 경과했으면 표시
-        if (inMark && fMark < m.spawnFrame) continue;
+    // ── 차징 입자 (모이는 빛) — GATHER+MARK 동안 마커 주변에서 안쪽으로 나선 수렴 ──
+    for (const p of rt.charges) {
+      const dx = p.mx - p.wx;
+      const dy = p.my - p.wy;
+      const d = Math.hypot(dx, dy);
+      const closeFrac = Math.max(0, Math.min(1, (CHARGE_SPAWN_RADIUS - d) / CHARGE_SPAWN_RADIUS));
+      const alpha = 0.55 + closeFrac * 0.40;
 
-        // 위치: 적 추적 (살아있으면 적 따라, 아니면 locked)
-        const e = enemies[m.enemyIdx];
-        let wx: number, wy: number;
-        if (e && e.active) {
-          wx = e.x;
-          wy = e.y;
-        } else {
-          wx = m.lockedWX;
-          wy = m.lockedWY;
-        }
+      // 트레일 (prev → 현재) — amber-700 으로 어둑하게 (흰 배경 대비)
+      this.chargeGfx.lineStyle(p.size * 0.7, COL_AMBER_DEEP, alpha * 0.55);
+      this.chargeGfx.moveTo(p.prevWX, p.prevWY);
+      this.chargeGfx.lineTo(p.wx, p.wy);
+      this.chargeGfx.lineStyle(0);
 
-        // 적 위 32px 십자가
-        const mx = wx;
-        const my = wy - 32;
-        const age = inMark ? (fMark - m.spawnFrame) : PHASE_MARK;
-        const spawnK = Math.min(1, age / 8); // 등장 애니
-        const pulse = 0.75 + 0.25 * Math.sin(this.time * 0.3 + m.enemyIdx * 0.7);
+      // 코어 (밝은 gold 점)
+      this.chargeGfx.beginFill(p.color, alpha);
+      this.chargeGfx.drawCircle(p.wx, p.wy, p.size);
+      this.chargeGfx.endFill();
+    }
 
-        // 광배 (ADD)
-        this.markerGlowGfx.beginFill(COL_YEL3, 0.32 * spawnK * pulse);
-        this.markerGlowGfx.drawCircle(mx, my, 18);
-        this.markerGlowGfx.endFill();
-        this.markerGlowGfx.beginFill(COL_AMBER2, 0.22 * spawnK);
-        this.markerGlowGfx.drawCircle(mx, my, 28);
-        this.markerGlowGfx.endFill();
+    // ── 마커 — 각 마커는 자기 폭발 발동 전까지만 표시 (순차 제거) ──
+    for (const m of rt.markers) {
+      if (m.fired) continue;
+      const absSpawn = rt.tMarkStart + m.spawnFrame;
+      if (f < absSpawn) continue;
 
-        // 십자 모양 — 수직 + 수평 바
-        const barLong = 14 * spawnK;
-        const barShort = 14 * spawnK;
-        const barW = 3.2;
-        this.markerGfx.beginFill(COL_YEL3, 0.95 * spawnK);
-        this.markerGfx.drawRect(mx - barW / 2, my - barLong, barW, barLong * 2);
-        this.markerGfx.drawRect(mx - barShort, my - barW / 2, barShort * 2, barW);
-        this.markerGfx.endFill();
-        // 코어 흰
-        this.markerGfx.beginFill(COL_WHITE, 0.92 * spawnK);
-        this.markerGfx.drawRect(mx - 1, my - barLong + 2, 2, barLong * 2 - 4);
-        this.markerGfx.drawRect(mx - barShort + 2, my - 1, (barShort - 2) * 2, 2);
-        this.markerGfx.endFill();
+      const e = enemies[m.enemyIdx];
+      let wx: number, wy: number;
+      if (e && e.active) { wx = e.x; wy = e.y; }
+      else { wx = m.lockedWX; wy = m.lockedWY; }
 
-        // 외곽 링 (회전 암시 위해 약간 점선처럼 두 호)
-        this.markerGfx.lineStyle(1.6 * spawnK, COL_AMBER7, 0.8 * spawnK);
-        const rotA = this.time * 0.08 + m.enemyIdx * 0.3;
-        this.markerGfx.arc(mx, my, 12, rotA, rotA + Math.PI * 0.75);
-        this.markerGfx.arc(mx, my, 12, rotA + Math.PI, rotA + Math.PI * 1.75);
-        this.markerGfx.lineStyle(0);
+      const mx = wx;
+      const my = wy - 32;
+      const age = f - absSpawn;
+      const spawnK = Math.min(1, age / 8);
+      const pulse = 0.75 + 0.25 * Math.sin(t * 0.3 + m.enemyIdx * 0.7);
+
+      this.drawMarker(mx, my, spawnK, pulse, t, m.enemyIdx);
+    }
+
+    // ── 폭발: 중앙 플래시 오브 + 파티클 burst + 트레일 ──
+    for (const ex of rt.explosions) {
+      const age = f - ex.birthFrame;
+
+      // (A) 중앙 플래시 오브 — 작고 빠르게 페이드 (화면을 덮지 않음)
+      if (age < CORE_FLASH_LIFE) {
+        const k = 1 - age / CORE_FLASH_LIFE;     // 1 → 0
+        const kSq = k * k;
+        const baseR = 6 + (1 - k) * 8;            // 6 → 14 px
+
+        // 외곽 dark amber — 흰 배경 대비 (살짝만)
+        this.burstGfx.beginFill(COL_AMBER_DEEP, 0.70 * k);
+        this.burstGfx.drawCircle(ex.wx, ex.wy, baseR * 1.6);
+        this.burstGfx.endFill();
+        // 중간 gold
+        this.burstGfx.beginFill(COL_AMBER_BRIGHT, 0.85 * k);
+        this.burstGfx.drawCircle(ex.wx, ex.wy, baseR * 1.1);
+        this.burstGfx.endFill();
+        // 밝은 노랑
+        this.burstGfx.beginFill(COL_GOLD_BRIGHT, 0.90 * kSq);
+        this.burstGfx.drawCircle(ex.wx, ex.wy, baseR * 0.75);
+        this.burstGfx.endFill();
+        // 크림
+        this.burstGfx.beginFill(COL_CREAM, 0.95 * kSq);
+        this.burstGfx.drawCircle(ex.wx, ex.wy, baseR * 0.45);
+        this.burstGfx.endFill();
+        // 핀포인트 (거의 흰)
+        this.burstGfx.beginFill(COL_NEAR_WHITE, 0.95 * kSq);
+        this.burstGfx.drawCircle(ex.wx, ex.wy, baseR * 0.22);
+        this.burstGfx.endFill();
+      }
+
+      // (B) 파티클 burst — 트레일 + 점
+      for (const p of ex.particles) {
+        const lifeK = p.life / p.maxLife;
+        if (lifeK <= 0) continue;
+        const alpha = lifeK * 0.95;
+        const sz = p.size * (0.55 + lifeK * 0.45);
+
+        // 트레일 (amber-700 기반 어두운 외곽 — 흰 배경 대비)
+        this.burstGfx.lineStyle(sz * 0.9, COL_AMBER_DEEP, alpha * 0.35);
+        this.burstGfx.moveTo(p.prevWX, p.prevWY);
+        this.burstGfx.lineTo(p.wx, p.wy);
+        this.burstGfx.lineStyle(0);
+
+        // 트레일 내부 밝은 라인 (gold)
+        this.burstGfx.lineStyle(sz * 0.5, p.color, alpha * 0.75);
+        this.burstGfx.moveTo(p.prevWX, p.prevWY);
+        this.burstGfx.lineTo(p.wx, p.wy);
+        this.burstGfx.lineStyle(0);
+
+        // 입자 외곽 (amber-deep stroke for white bg contrast)
+        this.burstGfx.lineStyle(0.9, COL_AMBER_DEEP, alpha * 0.85);
+        this.burstGfx.beginFill(p.color, alpha);
+        this.burstGfx.drawCircle(p.wx, p.wy, sz);
+        this.burstGfx.endFill();
+        this.burstGfx.lineStyle(0);
       }
     }
+  }
 
-    // ── 빔 ──
-    for (const b of rt.beams) {
-      const age = f - (PHASE_GATHER + PHASE_MARK) - b.start;
-      if (age < 0) continue;
-      const beamLife = PHASE_VERDICT + 10; // 광선 수명 (인버트 초반까지 끊기지 않음)
-      if (age > beamLife) continue;
-      const k = 1 - age / beamLife;
-      const peakK = Math.max(0, 1 - age / 4);      // 처음 4f 강렬
-      const ks = Math.max(0, 1 - age / 10);        // 지속 강도
+  /** 십자가 마커 — amber-deep 외곽 + gold 코어 + 크림 중심 점 + 회전 점선 링 */
+  private drawMarker(
+    mx: number, my: number,
+    spawnK: number, pulse: number,
+    t: number, idx: number,
+  ) {
+    const barLong = 14 * spawnK;
+    const barShort = 14 * spawnK;
+    const barW = 3.6;
 
-      // 화면 전체 수직 커버 — 월드좌표 빔이므로 y 범위는 카메라 기준 화면 전체 커버
-      const topWY = cameraY - 40;
-      const botWY = cameraY + canvasH + 40;
-      const bx = b.wx;
+    // 외곽 — amber-700 (흰 배경 대비)
+    this.markerGfx.beginFill(COL_AMBER_DEEP, 0.95 * spawnK);
+    this.markerGfx.drawRect(mx - barW / 2, my - barLong, barW, barLong * 2);
+    this.markerGfx.drawRect(mx - barShort, my - barW / 2, barShort * 2, barW);
+    this.markerGfx.endFill();
 
-      // halo (매우 넓은 amber)
-      this.beamHaloGfx.beginFill(COL_ORANGE3, 0.22 * ks);
-      this.beamHaloGfx.drawRect(bx - BEAM_HALO_W / 2, topWY, BEAM_HALO_W, botWY - topWY);
-      this.beamHaloGfx.endFill();
+    // 코어 — gold-300 (밝음)
+    this.markerGfx.beginFill(COL_GOLD_BRIGHT, 0.98 * spawnK);
+    this.markerGfx.drawRect(mx - 1.2, my - barLong + 2, 2.4, barLong * 2 - 4);
+    this.markerGfx.drawRect(mx - barShort + 2, my - 1.2, (barShort - 2) * 2, 2.4);
+    this.markerGfx.endFill();
 
-      // glow (yellow)
-      this.beamGlowGfx.beginFill(COL_YEL3, 0.48 * ks);
-      this.beamGlowGfx.drawRect(bx - BEAM_GLOW_W / 2, topWY, BEAM_GLOW_W, botWY - topWY);
-      this.beamGlowGfx.endFill();
-      this.beamGlowGfx.beginFill(COL_AMBER2, 0.62 * peakK);
-      this.beamGlowGfx.drawRect(bx - BEAM_GLOW_W / 4, topWY, BEAM_GLOW_W / 2, botWY - topWY);
-      this.beamGlowGfx.endFill();
+    // 중심 점 (박동) — 크림
+    this.markerGfx.beginFill(COL_CREAM, 0.98 * spawnK * pulse);
+    this.markerGfx.drawRect(mx - 1.6, my - 1.6, 3.2, 3.2);
+    this.markerGfx.endFill();
 
-      // core (white)
-      this.beamCoreGfx.beginFill(COL_WHITE, 0.95 * ks);
-      this.beamCoreGfx.drawRect(bx - BEAM_CORE_W / 2, topWY, BEAM_CORE_W, botWY - topWY);
-      this.beamCoreGfx.endFill();
-
-      // 타격 지면 링 — 적 y 주변 원형
-      const groundY = b.wy + 2;
-      this.beamBaseGfx.beginFill(COL_AMBER2, 0.55 * ks);
-      this.beamBaseGfx.drawEllipse(bx, groundY, BEAM_HALO_W * 0.8, 10 + age * 0.8);
-      this.beamBaseGfx.endFill();
-      this.beamBaseGfx.beginFill(COL_YEL3, 0.75 * peakK);
-      this.beamBaseGfx.drawEllipse(bx, groundY, BEAM_GLOW_W * 0.6, 6 + age * 0.4);
-      this.beamBaseGfx.endFill();
-    }
-
-    // ── 화면 오버레이 ──
-    // Verdict 직후 순간 강한 white flash
-    if (fVerdict >= 0 && fVerdict < 8 && rt.verdictFired) {
-      const p = 1 - fVerdict / 8;
-      this.screenGfx.beginFill(COL_AMBER1, 0.35 * p);
-      this.screenGfx.drawRect(0, 0, canvasW, canvasH);
-      this.screenGfx.endFill();
-    }
-    // Inversion 시작 시 white brief
-    if (inInvert) {
-      const fI = rt.frame - (PHASE_GATHER + PHASE_MARK + PHASE_VERDICT);
-      if (fI < 4) {
-        const p = 1 - fI / 4;
-        this.screenGfx.beginFill(COL_WHITE, 0.28 * p);
-        this.screenGfx.drawRect(0, 0, canvasW, canvasH);
-        this.screenGfx.endFill();
-      }
-    }
-    // Gather 페이즈 상단 hint
-    if (f < PHASE_GATHER + PHASE_MARK) {
-      const gk = Math.min(1, f / PHASE_GATHER);
-      this.screenGfx.beginFill(COL_AMBER1, 0.12 * gk);
-      this.screenGfx.drawRect(0, 0, canvasW, canvasH * 0.35);
-      this.screenGfx.endFill();
-    }
-
-    void cameraX;
+    // 외곽 회전 점선 호 (amber-deep) — 타겟 락 표현
+    this.markerGfx.lineStyle(1.6 * spawnK, COL_AMBER_DEEP, 0.85 * spawnK);
+    const rotA = t * 0.08 + idx * 0.3;
+    this.markerGfx.arc(mx, my, 13, rotA, rotA + Math.PI * 0.75);
+    this.markerGfx.arc(mx, my, 13, rotA + Math.PI, rotA + Math.PI * 1.75);
+    this.markerGfx.lineStyle(0);
   }
 
   destroy() {
-    this.detachFilter();
-    if (this.filter) {
-      this.filter.destroy?.();
-      this.filter = null;
-    }
     this.worldWrap.destroy({ children: true });
-    this.screenGfx.destroy();
     this.runtime = null;
   }
 }
 
-// 언사용 상수 경고 방지
-void COL_AMBER4;
+// ── 팔레트 미사용 경고 방지 (COL_GOLD_MAIN 은 colors 배열에서만 사용) ──
+void COL_GOLD_MAIN;
