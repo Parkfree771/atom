@@ -183,13 +183,17 @@ export interface EnemyProjectileState {
     | 'electric_chain_strike'  // A: 경로 따라 연쇄 strike node
     | 'electric_arc_rail'      // B: 보스→타겟너머 정지 전기 선 (긴 hit zone)
     | 'electric_dual_terminal' // C: 플레이어 양옆 pole 2개 + arcing 선
-    | 'light_prism_main'    // A main: 보스→midpoint 직선 beam
-    | 'light_prism_branch'  // A branch: midpoint에서 갈라지는 refraction
-    | 'light_halo'          // B: 보스 주위 expanding photon ring
-    | 'light_pillar'        // C: 플레이어 위치 수직 Sun Pillar
-    | 'dark_tendril'     // 촉수 (휘는 궤적)
-    | 'dark_void'        // 검은 구체
-    | 'dark_portal';     // 포털 스폰 마커
+    | 'light_convergence_mote'    // A 예고: photon mote가 보스 코어로 나선 수렴 (visual only, 연속 스트림)
+    | 'light_convergence_anchor'  // A 예고: 보스 위치 rotating prism core (visual only)
+    | 'light_convergence_beam'    // A: 수렴 완료 후 보스→플레이어 방향 단일 레이저 (4 hit point)
+    | 'light_prism_mote'        // B: 보스 양옆 3 emitter mote (strike 때 각자 평행 레이저 발사)
+    | 'light_prism_beam'        // B hit point: prism 평행 레이저 축 위의 피격 포인트
+    | 'light_collapse_mote'     // C: 플레이어 주위 링 모트 (strike 때 중심으로 돌진)
+    | 'light_collapse_anchor'   // C anchor: 잠금점 visual marker (ring outline + crosshair)
+    | 'dark_accretion_jet'     // A: spiral-outward 투사체 (log-spiral 궤적)
+    | 'dark_accretion_anchor'  // A 예고: 보스 위치 counter-rotating wind-up 링 (visual only)
+    | 'dark_rift_beam'         // B: spacetime rift 선분 hit point
+    | 'dark_mesh_pull';        // C: 보스의 시공간 mesh가 팽창→수축하며 플레이어 끌어당김
   /** 지연 투사체: 타이머 끝나면 실제 activate (착탄 대미지) — delay 동안은 예고/마커만 렌더 */
   delay?: number;
   /** delay 동안 N 프레임 비행 후 정지 (traveling preview — 보스→타겟 이동) */
@@ -204,6 +208,8 @@ export interface EnemyProjectileState {
   targetY?: number;
   /** orbit 반경 — 설정 시 pr.x/y는 origin 주위 circle에 잠금 */
   orbitRadius?: number;
+  /** orbitRadius 프레임당 감쇠 계수 (0.95~0.98 등). 설정 시 delay 단계에서 orbitRadius *= shrinkRate */
+  shrinkRate?: number;
   /** 추적 투사체용: 가속 */
   homing?: boolean;
   /** 초기 생성 시 각도 (tendril 회전용) */

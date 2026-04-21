@@ -530,9 +530,46 @@ export function drawEnemyProjectiles(g: PIXI.Graphics, glow: PIXI.Graphics, stat
   glow.clear();
   const projs = state.enemyProjectiles;
   const t = state.frameCount;
+  // ── 뷰포트 컬링 ── variant별 footprint 추정해서 화면 밖 projectile 즉시 skip.
+  //   극단 상황(수십 projectile 동시)에서 가장 큰 성능 이득.
+  const cL = state.cameraX;
+  const cR = cL + CANVAS_W;
+  const cT = state.cameraY;
+  const cB = cT + CANVAS_H;
   for (let i = 0; i < projs.length; i++) {
     const p = projs[i];
     if (!p.active) continue;
+    // ── Viewport cull (variant별 footprint) ──
+    {
+      const v = p.variant;
+      let skip = false;
+      if (v === 'dark_mesh_pull') {
+        // 3-ring mesh max 반경 ~420 + 여유
+        const ox = p.originX ?? p.x, oy = p.originY ?? p.y;
+        skip = ox + 460 < cL || ox - 460 > cR || oy + 460 < cT || oy - 460 > cB;
+      } else if (v === 'light_collapse_anchor') {
+        // ring radius 240 + 여유
+        skip = p.x + 260 < cL || p.x - 260 > cR || p.y + 260 < cT || p.y - 260 > cB;
+      } else if (
+        (v === 'light_convergence_beam' || v === 'electric_arc_rail' ||
+         v === 'electric_chain_strike' || v === 'electric_dual_terminal' ||
+         v === 'dark_rift_beam' || v === 'light_prism_mote') &&
+        p.originX !== undefined && p.originY !== undefined
+      ) {
+        // line/beam — segment bbox (origin, target, p.xy 전부 포함)
+        const ox = p.originX, oy = p.originY;
+        const tx = p.targetX ?? p.x, ty = p.targetY ?? p.y;
+        const minX = ox < tx ? (ox < p.x ? ox : p.x) : (tx < p.x ? tx : p.x);
+        const maxX = ox > tx ? (ox > p.x ? ox : p.x) : (tx > p.x ? tx : p.x);
+        const minY = oy < ty ? (oy < p.y ? oy : p.y) : (ty < p.y ? ty : p.y);
+        const maxY = oy > ty ? (oy > p.y ? oy : p.y) : (ty > p.y ? ty : p.y);
+        skip = maxX + 40 < cL || minX - 40 > cR || maxY + 40 < cT || minY - 40 > cB;
+      } else {
+        // 기본: 단일 포인트 + 여유 80
+        skip = p.x + 80 < cL || p.x - 80 > cR || p.y + 80 < cT || p.y - 80 > cB;
+      }
+      if (skip) continue;
+    }
 
     // ── 지연 예고 (delay>0): 변형별 마커 렌더 ──
     if (p.delay !== undefined && p.delay > 0) {
@@ -698,85 +735,269 @@ export function drawEnemyProjectiles(g: PIXI.Graphics, glow: PIXI.Graphics, stat
           g.lineTo(p.x - crossSize, p.y + crossSize);
           g.lineStyle(0);
         }
-      } else if (v === 'light_prism_main') {
-        // Prism Main PREVIEW — 보스→midpoint 가이드 선 + 두 endpoint plate.
+      } else if (v === 'light_convergence_mote') {
+        // Stellar Convergence PREVIEW — 보스로 나선 수렴하는 photon mote.
+        //    좌표/반경은 engine(shrinkRate)이 업데이트. 렌더는 거리 기반 알파 + 꼬리.
+        const radius = p.orbitRadius ?? 1;
+        if (radius < 4) continue;                  // 수렴 완료 — 렌더 스킵
         const ox = p.originX ?? p.x;
         const oy = p.originY ?? p.y;
-        const R = p.radius;
-        // 가이드 선 (thin gold, telegraph)
-        g.lineStyle(1.6, lerpLightColor(0.70), 0.28 + k * 0.32);
-        g.moveTo(ox, oy); g.lineTo(p.x, p.y);
+        const ddx = p.x - ox, ddy = p.y - oy;
+        const d = Math.hypot(ddx, ddy) || 1;
+        // 알파 3중 믹스:
+        //   nearFade: 중심 근처(<30)에서 페이드 아웃 (소멸 느낌)
+        //   farFade : 바깥(>245)에서 페이드 인 (새로 나타나는 느낌)
+        //   chargeA : 공격 전체 진행도
+        const nearFade = Math.min(1, (d - 6) / 24);
+        const farFade  = Math.min(1, (290 - d) / 45);
+        const chargeA  = 0.55 + k * 0.40;
+        const alpha    = Math.max(0, nearFade * farFade * chargeA);
+        if (alpha < 0.03) continue;
+        const rot = t * 0.09 + (p.spinAngle ?? 0) * 2;
+        const R = 3.8 + k * 2.4;
+        // crisp trail segment (금색 2톤 선 — 짧고 날카롭게)
+        const tDx = -ddx / d, tDy = -ddy / d;         // origin 쪽이 꼬리
+        const tailLen = 14 + k * 6;
+        g.lineStyle(1.6, lerpLightColor(0.30), 0.42 * alpha);
+        g.moveTo(p.x, p.y);
+        g.lineTo(p.x - tDx * tailLen, p.y - tDy * tailLen);
+        g.lineStyle(0.8, lerpLightColor(0.10), 0.72 * alpha);
+        g.moveTo(p.x, p.y);
+        g.lineTo(p.x - tDx * tailLen * 0.55, p.y - tDy * tailLen * 0.55);
         g.lineStyle(0);
-        // 시작점 (보스 side) + midpoint plate
-        drawGoldPlate(g, ox, oy, R * 0.45, k);
-        drawGoldPlate(g, p.x, p.y, R * 0.60, k);
-      } else if (v === 'light_prism_branch') {
-        // Prism Branch PREVIEW — midpoint(origin)→endpoint(target) 가이드 선 + endpoint plate.
+        // glow trail dots (ADD bloom)
+        for (let tk = 1; tk <= 4; tk++) {
+          const tx = p.x - tDx * tk * 3.6;
+          const ty = p.y - tDy * tk * 3.6;
+          glow.beginFill(lerpLightColor(0.38), 0.36 * (1 - tk / 5) * alpha);
+          glow.drawCircle(tx, ty, R * (0.58 - tk * 0.09));
+          glow.endFill();
+        }
+        // photon mote (alpha 반영 — drawPhotonMote는 intensity로 모든 내부 alpha 스케일)
+        drawPhotonMote(g, glow, p.x, p.y, R, rot, alpha);
+      } else if (v === 'light_convergence_anchor') {
+        // Stellar Convergence PREVIEW anchor — 보스 위치 rotating prism core.
+        //    충전 진행에 따라 레이어/펄스 강도 증가. 큰 흰 원 flash 금지 — 얇은 선/ADD bloom만.
+        const R = 18 + k * 14;                        // 18 → 32
+        const breath = 0.88 + Math.sin(t * 0.16) * 0.12;
+        // ── ADD bloom halo (subtle, breathing) ──
+        glow.beginFill(lerpLightColor(0.42), 0.18 * k * breath);
+        glow.drawCircle(p.x, p.y, R * 1.9);
+        glow.endFill();
+        glow.beginFill(lerpLightColor(0.28), 0.28 * k * breath);
+        glow.drawCircle(p.x, p.y, R * 1.15);
+        glow.endFill();
+        // ── 회전 hexagonal prism (3 layer, outer→inner 방향 다른 회전) ──
+        const outRot = t * 0.035;
+        const midRot = -t * 0.055;
+        const innRot = t * 0.085;
+        // outer hex (dim, wide)
+        g.lineStyle(1.4, lerpLightColor(0.68), 0.30 + k * 0.35);
+        drawHexPoly(g, p.x, p.y, R * 1.15, outRot);
+        // mid hex (selective fill — 얇은 stroke)
+        g.lineStyle(1.6, lerpLightColor(0.45), 0.45 + k * 0.45);
+        drawHexPoly(g, p.x, p.y, R * 0.80, midRot);
+        // inner hex (가장 밝음)
+        g.lineStyle(1.3, lerpLightColor(0.22), 0.55 + k * 0.40);
+        drawHexPoly(g, p.x, p.y, R * 0.48, innRot);
+        g.lineStyle(0);
+        // ── 60% 이상: 수축 inner ring 2겹 (락 감각) ──
+        if (k > 0.60) {
+          const ringProg = (k - 0.60) / 0.40;
+          for (let ri = 0; ri < 2; ri++) {
+            const ph = ((t + ri * 18) % 42) / 42;
+            const rr = R * (0.95 - ph * 0.60);
+            const al = (1 - ph) * 0.50 * ringProg;
+            g.lineStyle(1.3 - ph * 0.7, lerpLightColor(0.38), al);
+            g.drawCircle(p.x, p.y, rr);
+          }
+          g.lineStyle(0);
+        }
+        // ── 외곽 tick mark 12 (회전 시계) — 집중 느낌 ──
+        const tickRot = t * 0.02;
+        g.lineStyle(1.0, lerpLightColor(0.55), 0.32 + k * 0.45);
+        for (let i = 0; i < 12; i++) {
+          const a = tickRot + (i / 12) * Math.PI * 2;
+          const c = Math.cos(a), s = Math.sin(a);
+          g.moveTo(p.x + c * R * 1.30, p.y + s * R * 1.30);
+          g.lineTo(p.x + c * R * 1.42, p.y + s * R * 1.42);
+        }
+        g.lineStyle(0);
+        // ── 중심 코어 dot (작고 crisp — 큰 원 fill 절대 금지) ──
+        g.beginFill(lerpLightColor(0.15), 0.82 * breath);
+        g.drawCircle(p.x, p.y, 2.8 + k * 1.6);
+        g.endFill();
+        g.beginFill(lerpLightColor(0.02), 0.90);
+        g.drawCircle(p.x, p.y, 1.6 + k * 0.8);
+        g.endFill();
+      } else if (v === 'light_convergence_beam') {
+        // Stellar Convergence PREVIEW — beam hit point marker.
+        //    첫 projectile(frac<0.40)만 thin aim guide 렌더.
         const ox = p.originX ?? p.x;
         const oy = p.originY ?? p.y;
         const tx = p.targetX ?? p.x;
         const ty = p.targetY ?? p.y;
-        const R = p.radius;
-        g.lineStyle(1.4, lerpLightColor(0.72), 0.25 + k * 0.30);
-        g.moveTo(ox, oy); g.lineTo(tx, ty);
-        g.lineStyle(0);
-        // endpoint plate (target)
-        drawGoldPlate(g, tx, ty, R * 0.50, k);
-        // hit point marker (작은 plate)
-        drawGoldPlate(g, p.x, p.y, R * 0.35, k);
-      } else if (v === 'light_halo') {
-        // Halo Ring PREVIEW — node diamond plate가 formation.
-        const R = p.radius;
-        drawGoldPlate(g, p.x, p.y, R * 0.50, k);
-        // 보스 쪽 얇은 radial 선 (ring formation indicator)
+        const dl = Math.hypot(p.x - ox, p.y - oy);
+        const tLen = Math.hypot(tx - ox, ty - oy) || 1;
+        const fracOnBeam = dl / tLen;
+        if (fracOnBeam < 0.40) {
+          // Boss core에서 스며나오는 얇은 aim line (charged↑으로 alpha↑)
+          g.lineStyle(0.9 + k * 0.7, lerpLightColor(0.72), 0.14 + k * 0.36);
+          g.moveTo(ox, oy); g.lineTo(tx, ty);
+          g.lineStyle(0);
+        }
+        // hit point diamond marker (작고 crisp)
+        drawGoldPlate(g, p.x, p.y, p.radius * 0.28, k);
+      } else if (v === 'light_prism_mote') {
+        // Prism Cascade PREVIEW — emitter photon star + 뼈대 선 + 방향 가이드.
         const ox = p.originX ?? p.x;
         const oy = p.originY ?? p.y;
-        g.lineStyle(1.0, lerpLightColor(0.78), 0.22 + k * 0.25);
+        const tx = p.targetX ?? p.x;
+        const ty = p.targetY ?? p.y;
+        const rot = t * 0.07;
+        drawPhotonMote(g, glow, p.x, p.y, 5.5 + k * 2.5, rot, 0.55 + k * 0.40);
+        // 보스→mote 얇은 연결선 (formation 힌트)
+        g.lineStyle(0.8, lerpLightColor(0.74), 0.12 + k * 0.22);
         g.moveTo(ox, oy); g.lineTo(p.x, p.y);
         g.lineStyle(0);
-      } else if (v === 'light_pillar') {
-        // Sun Pillar PREVIEW — 지상 원 + 위에서 내려오는 가이드 선.
-        const R = p.radius;
-        // 지상 landing circle (점점 명확)
-        g.lineStyle(2.0, lerpLightColor(0.62), 0.45 + k * 0.40);
-        g.drawCircle(p.x, p.y, R * (0.95 + k * 0.10));
+        // mote→beam end 얇은 방향 가이드 (점점 진해짐)
+        g.lineStyle(1.0 + k * 0.6, lerpLightColor(0.62), 0.20 + k * 0.38);
+        g.moveTo(p.x, p.y); g.lineTo(tx, ty);
         g.lineStyle(0);
-        // 수축 inner ring (예고 강화)
-        for (let ri = 0; ri < 2; ri++) {
-          const phase = ((t + ri * 20) % 45) / 45;
-          const rr = R * (1.25 - phase * 0.80);
-          const al = (1 - phase) * (0.35 + k * 0.35);
-          g.lineStyle(1.5 - phase * 0.8, lerpLightColor(0.50), al);
-          g.drawCircle(p.x, p.y, rr);
-        }
-        g.lineStyle(0);
-        // 수직 guide line (위에서부터 내려오는 빛 기둥 표시)
-        const beamTopY = p.y - 400;
-        const beamW = 8 + k * 10;
-        // Thin dashed-like guide (implement as short segments)
-        const segH = 20;
-        for (let sy = beamTopY; sy < p.y - 20; sy += segH * 2) {
-          g.lineStyle(beamW * 0.4, lerpLightColor(0.70), 0.35 + k * 0.35);
-          g.moveTo(p.x, sy);
-          g.lineTo(p.x, Math.min(sy + segH, p.y - 20));
-        }
-        g.lineStyle(0);
-        // 중심 marker
-        drawGoldPlate(g, p.x, p.y, R * 0.30, k);
-      } else if (v === 'dark_portal') {
-        // 어두운 포털 회전 고리
-        const rot = t * 0.12;
-        const R = p.radius * (0.5 + k * 0.5);
-        g.lineStyle(3, 0x020010, 0.95);
+      } else if (v === 'light_prism_beam') {
+        // Prism Cascade PREVIEW — beam hit point marker (작고 희미).
+        //    연결선은 mote가 담당, 여기선 hit point만.
+        drawGoldPlate(g, p.x, p.y, p.radius * 0.26, k);
+      } else if (v === 'light_collapse_anchor') {
+        // Stellar Collapse PREVIEW — ring outline + lockpoint crosshair (single projectile).
+        const R = p.radius;   // RING_R
+        // ring outline (thin, 점점 진해짐 + 천천히 회전하는 tick marks)
+        g.lineStyle(1.2, lerpLightColor(0.72), 0.14 + k * 0.28);
         g.drawCircle(p.x, p.y, R);
-        g.lineStyle(2, 0x7e22ce, 0.65);
-        g.arc(p.x, p.y, R * 0.85, rot, rot + Math.PI * 1.2);
-        g.lineStyle(1.5, 0xa855f7, 0.55);
-        g.arc(p.x, p.y, R * 0.65, -rot, -rot + Math.PI * 1.0);
         g.lineStyle(0);
-        g.beginFill(0x020010, 0.85);
-        g.drawCircle(p.x, p.y, R * 0.45);
+        // 링 위 12개 tick mark (시계처럼 회전)
+        const tickRot = t * 0.012;
+        g.lineStyle(1.3, lerpLightColor(0.55), 0.30 + k * 0.40);
+        for (let i = 0; i < 12; i++) {
+          const a = tickRot + (i / 12) * Math.PI * 2;
+          const c = Math.cos(a), s = Math.sin(a);
+          g.moveTo(p.x + c * R * 0.95, p.y + s * R * 0.95);
+          g.lineTo(p.x + c * R * 1.02, p.y + s * R * 1.02);
+        }
+        g.lineStyle(0);
+        // lockpoint crosshair (작고 crisp)
+        const cs = 9 + k * 5;
+        g.lineStyle(1.2, lerpLightColor(0.45), 0.45 + k * 0.40);
+        g.moveTo(p.x - cs, p.y); g.lineTo(p.x + cs, p.y);
+        g.moveTo(p.x, p.y - cs); g.lineTo(p.x, p.y + cs);
+        // 대각 (작게)
+        const ds = cs * 0.55;
+        g.moveTo(p.x - ds, p.y - ds); g.lineTo(p.x + ds, p.y + ds);
+        g.moveTo(p.x - ds, p.y + ds); g.lineTo(p.x + ds, p.y - ds);
+        g.lineStyle(0);
+        // 중심 tiny dot (lockpoint)
+        g.beginFill(lerpLightColor(0.08), 0.85);
+        g.drawCircle(p.x, p.y, 2.2);
         g.endFill();
+      } else if (v === 'light_collapse_mote') {
+        // Stellar Collapse PREVIEW — 링 위 대기 중 photon mote (천천히 자전, 반경 bob).
+        const rot = t * 0.055 + (p.spinAngle ?? 0) * 2;
+        const bob = Math.sin(t * 0.10 + (p.spinAngle ?? 0) * 3) * 1.4;
+        // 반경 방향 bob (살짝 안팎으로 움직이며 긴장감)
+        const radAng = p.spinAngle ?? 0;
+        const bx = p.x + Math.cos(radAng) * bob;
+        const by = p.y + Math.sin(radAng) * bob;
+        drawPhotonMote(g, glow, bx, by, 5.5 + k * 2.2, rot, 0.48 + k * 0.48);
+      } else if (v === 'dark_accretion_jet') {
+        // Accretion Jet TELEGRAPH — jet은 모두 보스 위치에 겹쳐있음. anchor가 시각 담당, jet 자체는 렌더 생략.
+        // (코드 간결성 위해 continue 없이 아무 fallback 렌더도 안 하도록 빈 블록 유지)
+      } else if (v === 'dark_accretion_anchor') {
+        // Accretion Jet TELEGRAPH — 보스 위치 counter-rotating wind-up.
+        //    2개의 반대 방향 회전 ring이 수축 + 외곽 tick + 중심에 dark nucleus 형성.
+        const R = 24 + k * 14;                       // 24 → 38
+        const breath = 0.90 + Math.sin(t * 0.17) * 0.10;
+        // ── subtle ADD bloom (매우 약하게 — dark 테마는 glow 절제) ──
+        glow.beginFill(lerpDarkColor(0.28), 0.14 * k * breath);
+        glow.drawCircle(p.x, p.y, R * 1.9);
+        glow.endFill();
+        // ── counter-rotating 2-ring (mesh-fan 힌트) ──
+        const rotA = t * 0.045;
+        const rotB = -t * 0.062;
+        g.lineStyle(1.3, lerpDarkColor(0.74), 0.40 + k * 0.45);
+        drawHexPoly(g, p.x, p.y, R * 1.05, rotA);
+        g.lineStyle(1.6, lerpDarkColor(0.55), 0.52 + k * 0.40);
+        drawHexPoly(g, p.x, p.y, R * 0.70, rotB);
+        g.lineStyle(0);
+        // ── 외곽 16 tick (수축하며 회전) ──
+        const tickRot = t * 0.018;
+        g.lineStyle(1.0, lerpDarkColor(0.68), 0.30 + k * 0.45);
+        for (let i = 0; i < 16; i++) {
+          const a = tickRot + (i / 16) * Math.PI * 2;
+          const c = Math.cos(a), s = Math.sin(a);
+          const rIn = R * (1.30 - k * 0.15);          // 수축
+          const rOut = R * 1.45;
+          g.moveTo(p.x + c * rIn, p.y + s * rIn);
+          g.lineTo(p.x + c * rOut, p.y + s * rOut);
+        }
+        g.lineStyle(0);
+        // ── 중심 event horizon pre-core (작은 순흑 dot + violet rim) ──
+        const coreR = 2.5 + k * 2.0;
+        g.lineStyle(1.2, lerpDarkColor(0.18), 0.55 + k * 0.40);
+        g.drawCircle(p.x, p.y, coreR + 1.2);
+        g.lineStyle(0);
+        g.beginFill(0x000000, 0.85 * breath);
+        g.drawCircle(p.x, p.y, coreR);
+        g.endFill();
+      } else if (v === 'dark_rift_beam') {
+        // Spacetime Rift TELEGRAPH — 보스→끝점 seam + 주변에 jitter하는 mesh shard들.
+        //    첫 projectile(frac<0.32)이 full seam 렌더, 나머지는 작은 shard marker만.
+        const ox = p.originX ?? p.x;
+        const oy = p.originY ?? p.y;
+        const tx = p.targetX ?? p.x;
+        const ty = p.targetY ?? p.y;
+        const dl = Math.hypot(p.x - ox, p.y - oy);
+        const tLen = Math.hypot(tx - ox, ty - oy) || 1;
+        const fracOnBeam = dl / tLen;
+        if (fracOnBeam < 0.32) {
+          // 본 seam (얇은 violet)
+          g.lineStyle(1.1 + k * 0.7, lerpDarkColor(0.12), 0.22 + k * 0.40);
+          g.moveTo(ox, oy); g.lineTo(tx, ty);
+          g.lineStyle(0);
+          // 주변에 흩뿌려진 mesh shard들 (seed 기반 LCG, 흔들림)
+          const dxn = (tx - ox) / tLen, dyn = (ty - oy) / tLen;
+          const perpX = -dyn, perpY = dxn;
+          let seed = Math.floor(t * 0.3) | 0;         // 천천히 변하는 seed (jitter)
+          for (let i = 1; i < 12; i++) {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            const frac = i / 12;
+            const jit = ((seed % 131) / 131 - 0.5) * 18;
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            const side = ((seed % 97) / 97 - 0.5);
+            const sx = ox + dxn * tLen * frac + perpX * (jit + side * 8);
+            const sy = oy + dyn * tLen * frac + perpY * (jit + side * 8);
+            const shardRot = Math.atan2(dyn, dxn) + side * 1.2;
+            drawMeshShard(g, sx, sy, 3.2 + k * 2.6, shardRot, k);
+          }
+        }
+        // hit point marker (이 projectile의 위치에 작은 shard)
+        drawMeshShard(g, p.x, p.y, 3.6 + k * 2.2, t * 0.05 + fracOnBeam * 4, k);
+      } else if (v === 'dark_mesh_pull') {
+        // Mesh Pull TELEGRAPH — 시공간 mesh가 보스→바깥으로 펼쳐지는 phase.
+        //    delay 값으로 phase 판단: delay > HOLD → expand, else → hold.
+        //    EXPAND=45, HOLD=18 (engine 상수와 일치).
+        const EXPAND = 45;
+        const HOLD = 18;
+        const delayVal = p.delay ?? 0;
+        let phase: 'expand' | 'hold';
+        let progress: number;
+        if (delayVal > HOLD) {
+          phase = 'expand';
+          progress = Math.max(0, Math.min(1, (EXPAND + HOLD - delayVal) / EXPAND));
+        } else {
+          phase = 'hold';
+          progress = 1 - delayVal / HOLD;                // 0→1 (시간 경과)
+        }
+        drawSpacetimeMesh(g, glow, p.x, p.y, t, phase, progress);
       } else {
         // 기타 — 단순 경고 링
         g.lineStyle(2, p.color, 0.55 + k * 0.4);
@@ -792,9 +1013,9 @@ export function drawEnemyProjectiles(g: PIXI.Graphics, glow: PIXI.Graphics, stat
       v0 === 'water_tidal_preview' ||
       v0 === 'electric_chain_strike' || v0 === 'electric_arc_rail' ||
       v0 === 'electric_dual_terminal' ||
-      v0 === 'light_prism_main' || v0 === 'light_prism_branch' ||
-      v0 === 'light_pillar' ||
-      v0 === 'dark_portal'
+      v0 === 'light_convergence_beam' ||
+      v0 === 'light_prism_mote' || v0 === 'light_prism_beam' ||
+      v0 === 'dark_rift_beam'
     );
     if (isExplosionFlash && p.vx === 0 && p.vy === 0 && p.life <= 20 && p.life > 0) {
       const v = p.variant;
@@ -903,86 +1124,49 @@ export function drawEnemyProjectiles(g: PIXI.Graphics, glow: PIXI.Graphics, stat
           g.lineTo(p.x - crossSize, p.y + crossSize);
           g.lineStyle(0);
         }
-      } else if (v === 'light_prism_main') {
-        // Prism Main STRIKE — 보스→midpoint bright gold beam.
-        const ox = p.originX ?? p.x;
-        const oy = p.originY ?? p.y;
-        const R = p.radius;
-        // beam 3겹 (outer glow + mid + core)
-        g.lineStyle(5.5 * pulse + 1.5, lerpLightColor(0.65), 0.55 * pulse);
-        g.moveTo(ox, oy); g.lineTo(p.x, p.y);
-        g.lineStyle(2.8 * pulse + 0.8, lerpLightColor(0.35), 0.85 * pulse);
-        g.moveTo(ox, oy); g.lineTo(p.x, p.y);
-        g.lineStyle(1.2 * pulse + 0.4, lerpLightColor(0.15), pulse);
-        g.moveTo(ox, oy); g.lineTo(p.x, p.y);
-        g.lineStyle(0);
-        // endpoint plate expansion
-        drawGoldPlate(g, ox, oy, R * 0.50 * (1 + (1-pulse) * 0.3), pulse);
-        drawGoldPlate(g, p.x, p.y, R * 0.75 * (1 + (1-pulse) * 0.4), pulse);
-      } else if (v === 'light_prism_branch') {
-        // Prism Branch STRIKE — midpoint→endpoint bright gold beam.
+      } else if (v === 'light_convergence_beam') {
+        // Stellar Convergence STRIKE — 4 hit point 중 첫 번째(frac<0.40)만 full beam 렌더.
+        //    나머지는 hit point sparkle만.
         const ox = p.originX ?? p.x;
         const oy = p.originY ?? p.y;
         const tx = p.targetX ?? p.x;
         const ty = p.targetY ?? p.y;
-        const R = p.radius;
-        g.lineStyle(4.5 * pulse + 1.2, lerpLightColor(0.62), 0.55 * pulse);
-        g.moveTo(ox, oy); g.lineTo(tx, ty);
-        g.lineStyle(2.2 * pulse + 0.6, lerpLightColor(0.30), 0.88 * pulse);
-        g.moveTo(ox, oy); g.lineTo(tx, ty);
-        g.lineStyle(1.0 * pulse + 0.3, lerpLightColor(0.12), pulse);
-        g.moveTo(ox, oy); g.lineTo(tx, ty);
-        g.lineStyle(0);
-        // endpoint flash
-        drawGoldPlate(g, tx, ty, R * 0.60 * (1 + (1-pulse) * 0.4), pulse);
-        // hit point flash
-        drawGoldPlate(g, p.x, p.y, R * 0.48 * (1 + (1-pulse) * 0.4), pulse);
-      } else if (v === 'light_pillar') {
-        // Sun Pillar STRIKE — 수직 빛 기둥 (위에서 내려오는 bright column + 지상 burst).
-        const R = p.radius;
-        const beamTopY = p.y - 400;
-        const colH = p.y - beamTopY;
-        const beamW = 30 * pulse + 14;
-        // 기둥 3겹 (outer glow, mid, bright core)
-        g.beginFill(lerpLightColor(0.62), 0.52 * pulse);
-        g.drawRect(p.x - beamW / 2, beamTopY, beamW, colH);
-        g.endFill();
-        g.beginFill(lerpLightColor(0.32), 0.80 * pulse);
-        g.drawRect(p.x - beamW * 0.55, beamTopY, beamW * 0.55 * 2, colH);
-        g.endFill();
-        g.beginFill(lerpLightColor(0.10), pulse);
-        g.drawRect(p.x - beamW * 0.25, beamTopY, beamW * 0.50, colH);
-        g.endFill();
-        // 지상 원 burst (확장)
-        const expand = 1 + (1 - pulse) * 0.55;
-        g.beginFill(lerpLightColor(0.45), 0.65 * pulse);
-        g.drawCircle(p.x, p.y, R * 0.85 * expand);
-        g.endFill();
-        g.beginFill(lerpLightColor(0.20), 0.85 * pulse);
-        g.drawCircle(p.x, p.y, R * 0.50 * expand);
-        g.endFill();
-        g.beginFill(lerpLightColor(0.05), pulse);
-        g.drawCircle(p.x, p.y, R * 0.25);
-        g.endFill();
-        // 6방 radial gold spark (지상 impact)
-        g.lineStyle(2.4 * pulse + 0.6, lerpLightColor(0.35), 0.88 * pulse);
-        for (let sp = 0; sp < 6; sp++) {
-          const a = (sp / 6) * Math.PI * 2 + t * 0.02;
-          const sparkR = R * (1.0 + (1 - pulse) * 0.6);
-          g.moveTo(p.x + Math.cos(a) * R * 0.5, p.y + Math.sin(a) * R * 0.5);
-          g.lineTo(p.x + Math.cos(a) * sparkR, p.y + Math.sin(a) * sparkR);
+        const dl = Math.hypot(p.x - ox, p.y - oy);
+        const tLen = Math.hypot(tx - ox, ty - oy) || 1;
+        const fracOnBeam = dl / tLen;
+        if (fracOnBeam < 0.40) {
+          drawLightBeam(g, glow, ox, oy, tx, ty, 14, pulse);
+          // origin burst (보스 측 — crisp octagon 스파크)
+          drawLightSparkBurst(g, glow, ox, oy, 24, t * 0.12, pulse);
         }
-        g.lineStyle(0);
-      } else if (v === 'dark_portal') {
-        g.beginFill(0x020010, 0.9 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * 1.1);
-        g.endFill();
-        g.beginFill(0x7e22ce, 0.7 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * 0.7);
-        g.endFill();
-        g.beginFill(0xa855f7, 0.8 * pulse);
-        g.drawCircle(p.x, p.y, p.radius * 0.4);
-        g.endFill();
+        // 이 hit point의 sparkle
+        drawLightSparkBurst(g, glow, p.x, p.y, 16, t * 0.09 + fracOnBeam * 3, pulse);
+      } else if (v === 'light_prism_mote') {
+        // Prism Cascade STRIKE — emitter mote에서 beam 발사.
+        const tx = p.targetX ?? p.x;
+        const ty = p.targetY ?? p.y;
+        drawLightBeam(g, glow, p.x, p.y, tx, ty, 10, pulse);
+        // emitter sparkle + 회전 photon star (점점 줄어듦 pulse→0)
+        const rot = t * 0.22;
+        drawLightSparkBurst(g, glow, p.x, p.y, 20 * pulse + 8, rot * 0.4, pulse);
+        drawPhotonMote(g, glow, p.x, p.y, 6.5 * pulse + 3, rot, 0.75 + pulse * 0.25);
+      } else if (v === 'light_prism_beam') {
+        // Prism hit point STRIKE — 작고 crisp sparkle (beam은 mote가 담당).
+        drawLightSparkBurst(g, glow, p.x, p.y, 13, t * 0.08 + (p.originX ?? 0) * 0.01, pulse);
+      } else if (v === 'dark_rift_beam') {
+        // Spacetime Rift STRIKE — 찢어진 seam이 열림. 첫 projectile(frac<0.32)만 full 렌더.
+        const ox = p.originX ?? p.x;
+        const oy = p.originY ?? p.y;
+        const tx = p.targetX ?? p.x;
+        const ty = p.targetY ?? p.y;
+        const tLen = Math.hypot(tx - ox, ty - oy) || 1;
+        const dl = Math.hypot(p.x - ox, p.y - oy);
+        const fracOnBeam = dl / tLen;
+        if (fracOnBeam < 0.32) {
+          drawRiftSeam(g, glow, ox, oy, tx, ty, pulse, t);
+        }
+        // 이 hit point 주변에 튀어나온 큰 shard들 (strike burst)
+        drawRiftBurst(g, glow, p.x, p.y, 14, pulse, t + fracOnBeam * 30);
       }
       continue;
     }
@@ -1111,6 +1295,377 @@ function lerpElectricColor(tFrac: number): number {
   return (r << 16) | (g << 8) | b;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// 암흑 팔레트 — Event Horizon 테마. violet accent + slate ramp + 순흑색.
+//   흰 배경 대응: 가장 어두운 톤은 black, 밝은 끝은 violet-300 (brightest accent).
+//   도료 사용: 이벤트 호라이즌(0.8~1.0 범위), rim/seam(0.10~0.25), mesh(0.60~0.85).
+// ═══════════════════════════════════════════════════════════════════
+const DARK_STOPS: Array<[number, number, number, number]> = [
+  [0.00, 196, 181, 253], // violet-300 (최고 accent — rim/leak light용)
+  [0.15, 167, 139, 250], // violet-400
+  [0.30, 139,  92, 246], // violet-500
+  [0.48, 109,  40, 217], // violet-700
+  [0.64,  51,  65,  85], // slate-700 (흰 배경 대응 mid-dark)
+  [0.82,  15,  23,  42], // slate-900
+  [1.00,   0,   0,   0], // 순흑 (event horizon)
+];
+function lerpDarkColor(tFrac: number): number {
+  const tc = Math.max(0, Math.min(1, tFrac));
+  for (let i = 1; i < DARK_STOPS.length; i++) {
+    const [t1, r1, g1, b1] = DARK_STOPS[i];
+    if (tc <= t1) {
+      const [t0, r0, g0, b0] = DARK_STOPS[i - 1];
+      const k = (tc - t0) / (t1 - t0);
+      return (
+        (Math.round(r0 + (r1 - r0) * k) << 16) |
+        (Math.round(g0 + (g1 - g0) * k) <<  8) |
+         Math.round(b0 + (b1 - b0) * k)
+      );
+    }
+  }
+  const [, r, g, b] = DARK_STOPS[DARK_STOPS.length - 1];
+  return (r << 16) | (g << 8) | b;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Mesh shard — spacetime mesh의 삼각 조각 (rift 주변, horizon 노드 외곽).
+//   작은 irregular 삼각형 + 얇은 outline. slate fill + violet rim accent.
+// ═══════════════════════════════════════════════════════════════════
+function drawMeshShard(
+  g: PIXI.Graphics,
+  cx: number, cy: number, R: number,
+  rot: number,
+  intensity: number,
+) {
+  // 3-point 불규칙 삼각 (각 꼭짓점 살짝 랜덤 → LCG deterministic)
+  let seed = (Math.round(cx * 13 + cy * 17 + rot * 37)) | 0;
+  const pts: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const jit = 0.75 + ((seed % 89) / 89) * 0.45;    // 0.75~1.20
+    const a = rot + (i / 3) * Math.PI * 2;
+    pts.push(cx + Math.cos(a) * R * jit, cy + Math.sin(a) * R * jit);
+  }
+  // dark fill (slate-800)
+  g.beginFill(lerpDarkColor(0.82), 0.50 + intensity * 0.28);
+  g.drawPolygon(pts);
+  g.endFill();
+  // violet-edge rim
+  g.lineStyle(1.0, lerpDarkColor(0.40), 0.60 + intensity * 0.35);
+  g.drawPolygon(pts);
+  g.lineStyle(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Spacetime mesh — 보스 body의 시공간 격자를 공격으로 확장/수축 재현.
+//   3 ring (radii 스케일 확장/수축), triangulated fan fill + edge line + node dot.
+//   contract 단계에선 violet 방사 pull-streams + 중심 경고 링 추가.
+// ═══════════════════════════════════════════════════════════════════
+// ── Module-scope reusable buffers (GC 압박 제거 — 함수 호출마다 array 재생성 안 함) ──
+const _MESH_INITIAL = [88, 142, 204];
+const _MESH_MAX     = [248, 328, 412];
+const _MESH_NODE_COUNT = [15, 21, 27];
+// 2D 버퍼: ring별 x/y 좌표 (최대 크기로 pre-allocate, 재사용)
+const _meshRingX: Float32Array[] = [
+  new Float32Array(15), new Float32Array(21), new Float32Array(27),
+];
+const _meshRingY: Float32Array[] = [
+  new Float32Array(15), new Float32Array(21), new Float32Array(27),
+];
+// 현재 반경 버퍼 (매번 3요소 — array 재사용)
+const _meshR: [number, number, number] = [0, 0, 0];
+// node seed pre-computed (ring × node index) — 매 호출마다 변하지 않음, 생성 1회
+const _meshSeed: Float32Array[] = (() => {
+  const out: Float32Array[] = [];
+  for (let ri = 0; ri < 3; ri++) {
+    const arr = new Float32Array(_MESH_NODE_COUNT[ri]);
+    for (let k = 0; k < _MESH_NODE_COUNT[ri]; k++) {
+      arr[k] = ((k * 73 + ri * 53) % 97) / 97;
+    }
+    out.push(arr);
+  }
+  return out;
+})();
+// 삼각형 폴리곤 재사용 버퍼 (3 vertex × 2 = 6 numbers). drawPolygon은 내부 copy하므로 mutation 안전.
+const _meshTriBuf: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
+
+function drawSpacetimeMesh(
+  g: PIXI.Graphics, glow: PIXI.Graphics,
+  cx: number, cy: number, t: number,
+  phase: 'expand' | 'hold' | 'contract',
+  progress: number,
+) {
+  // 3 ring 반경 계산 (in-place — array 할당 없음)
+  let alpha: number;
+  if (phase === 'expand') {
+    const p = 1 - (1 - progress) * (1 - progress) * (1 - progress);  // easeOutCubic
+    _meshR[0] = _MESH_INITIAL[0] + (_MESH_MAX[0] - _MESH_INITIAL[0]) * p;
+    _meshR[1] = _MESH_INITIAL[1] + (_MESH_MAX[1] - _MESH_INITIAL[1]) * p;
+    _meshR[2] = _MESH_INITIAL[2] + (_MESH_MAX[2] - _MESH_INITIAL[2]) * p;
+    alpha = 0.35 + progress * 0.55;
+  } else if (phase === 'hold') {
+    _meshR[0] = _MESH_MAX[0]; _meshR[1] = _MESH_MAX[1]; _meshR[2] = _MESH_MAX[2];
+    alpha = 0.92;
+  } else {
+    const p = progress * progress * progress;  // easeInCubic
+    _meshR[0] = _MESH_MAX[0] + (_MESH_INITIAL[0] - _MESH_MAX[0]) * p;
+    _meshR[1] = _MESH_MAX[1] + (_MESH_INITIAL[1] - _MESH_MAX[1]) * p;
+    _meshR[2] = _MESH_MAX[2] + (_MESH_INITIAL[2] - _MESH_MAX[2]) * p;
+    alpha = Math.max(0.20, 0.90 - progress * 0.35);
+  }
+
+  // 노드 좌표 계산 — buffer 재사용, trig 최소화
+  const slowRot = t * 0.006;
+  const tA = t * 0.009;      // angular wobble time factor
+  const tR = t * 0.011;      // radial wobble time factor
+  const TAU = Math.PI * 2;
+  for (let ri = 0; ri < 3; ri++) {
+    const count = _MESH_NODE_COUNT[ri];
+    const phaseOff = ri * 0.22;
+    const phaseOff4 = phaseOff * 4;
+    const phaseOff6 = phaseOff * 6;
+    const R_ri = _meshR[ri];
+    const seeds = _meshSeed[ri];
+    const xsBuf = _meshRingX[ri];
+    const ysBuf = _meshRingY[ri];
+    for (let k = 0; k < count; k++) {
+      const seed = seeds[k];
+      const baseA = (k / count) * TAU + phaseOff + (seed - 0.5) * 0.18 + slowRot;
+      const aWob = Math.sin(tA + k * 1.7 + phaseOff4) * 0.055;
+      const rWob = 1 + Math.sin(tR + k * 0.83 + phaseOff6) * 0.08 + (seed - 0.5) * 0.10;
+      const aa = baseA + aWob;
+      const rr = R_ri * rWob;
+      xsBuf[k] = cx + Math.cos(aa) * rr;
+      ysBuf[k] = cy + Math.sin(aa) * rr;
+    }
+  }
+  const ringX = _meshRingX;
+  const ringY = _meshRingY;
+
+  // ── 1. Triangulated fan fill (inter-ring) — slate/indigo 3색 랜덤 ──
+  const C_SLATE_8  = 0x1e293b;
+  const C_SLATE_9  = 0x0f172a;
+  const C_INDIGO_9 = 0x1e1b4b;
+  const tri = _meshTriBuf;
+  for (let ri = 0; ri < 2; ri++) {
+    const aXs = ringX[ri], aYs = ringY[ri];
+    const bXs = ringX[ri + 1], bYs = ringY[ri + 1];
+    const aCount = aXs.length, bCount = bXs.length;
+    const step = bCount / aCount;
+    let triSeed = (ri * 131 + 17) | 0;
+    for (let i = 0; i < aCount; i++) {
+      const a0x = aXs[i], a0y = aYs[i];
+      const iNext = (i + 1) % aCount;
+      const a1x = aXs[iNext], a1y = aYs[iNext];
+      const bStart = (i * step) | 0;
+      const bEnd = ((i + 1) * step) | 0;
+      for (let j = bStart; j < bEnd; j++) {
+        const j0 = j >= bCount ? j - bCount : j;
+        const j1Raw = j + 1;
+        const j1 = j1Raw >= bCount ? j1Raw - bCount : j1Raw;
+        triSeed = (triSeed * 1103515245 + 12345) & 0x7fffffff;
+        const fillA = (0.04 + ((triSeed % 131) / 131) * 0.15) * alpha;
+        const colorPick = (triSeed >> 8) % 3;
+        const col = colorPick === 0 ? C_SLATE_8 : colorPick === 1 ? C_SLATE_9 : C_INDIGO_9;
+        tri[0] = a0x; tri[1] = a0y;
+        tri[2] = bXs[j0]; tri[3] = bYs[j0];
+        tri[4] = bXs[j1]; tri[5] = bYs[j1];
+        g.beginFill(col, fillA);
+        g.drawPolygon(tri);
+        g.endFill();
+      }
+      // Bridge triangle
+      triSeed = (triSeed * 1103515245 + 12345) & 0x7fffffff;
+      const bridgeA = (0.04 + ((triSeed % 131) / 131) * 0.15) * alpha;
+      const bridgeC = (triSeed >> 8) % 3;
+      const bridgeCol = bridgeC === 0 ? C_SLATE_8 : bridgeC === 1 ? C_SLATE_9 : C_INDIGO_9;
+      const bEndJ = bEnd >= bCount ? bEnd - bCount : bEnd;
+      tri[0] = a0x; tri[1] = a0y;
+      tri[2] = a1x; tri[3] = a1y;
+      tri[4] = bXs[bEndJ]; tri[5] = bYs[bEndJ];
+      g.beginFill(bridgeCol, bridgeA);
+      g.drawPolygon(tri);
+      g.endFill();
+    }
+  }
+
+  // ── 2. Ring polygon edges ──
+  g.lineStyle(1.0, lerpDarkColor(0.68), 0.66 * alpha);
+  for (let ri = 0; ri < 3; ri++) {
+    const xs = ringX[ri], ys = ringY[ri];
+    for (let i = 0; i < xs.length; i++) {
+      const nxt = (i + 1) % xs.length;
+      g.moveTo(xs[i], ys[i]);
+      g.lineTo(xs[nxt], ys[nxt]);
+    }
+  }
+  g.lineStyle(0);
+
+  // ── 3. Inter-ring fan edges ──
+  g.lineStyle(0.7, lerpDarkColor(0.68), 0.42 * alpha);
+  for (let ri = 0; ri < 2; ri++) {
+    const aXs = ringX[ri], aYs = ringY[ri];
+    const bXs = ringX[ri + 1], bYs = ringY[ri + 1];
+    const aCount = aXs.length, bCount = bXs.length;
+    const step = bCount / aCount;
+    for (let i = 0; i < aCount; i++) {
+      const ax = aXs[i], ay = aYs[i];
+      const bStart = (i * step) | 0;
+      const bEnd = ((i + 1) * step) | 0;
+      for (let j = bStart; j <= bEnd; j++) {
+        const jm = j >= bCount ? j - bCount : j;
+        g.moveTo(ax, ay);
+        g.lineTo(bXs[jm], bYs[jm]);
+      }
+    }
+  }
+  g.lineStyle(0);
+
+  // ── 4. Mesh node dot (교차점) ──
+  g.beginFill(lerpDarkColor(0.82), 0.72 * alpha);
+  for (let ri = 0; ri < 3; ri++) {
+    const xs = ringX[ri], ys = ringY[ri];
+    for (let i = 0; i < xs.length; i++) {
+      g.drawCircle(xs[i], ys[i], 1.7);
+    }
+  }
+  g.endFill();
+
+  // ── 5. Contract 단계 — violet radial pull stream + 중심 경고 링 ──
+  if (phase === 'contract' && progress > 0.08) {
+    // 방사형 pull line 16개 (안쪽으로 흘러 들어감, ADD blend)
+    const pullIntensity = Math.pow(progress, 0.85);
+    glow.lineStyle(1.6, lerpDarkColor(0.22), 0.55 * pullIntensity);
+    for (let k = 0; k < 16; k++) {
+      const a = k * Math.PI / 8 + t * 0.035;
+      // 바깥→안쪽 방향 짧은 line (length는 progress 따라 길어짐)
+      const rOut = R[0] * (0.95 + pullIntensity * 0.30);
+      const rIn = R[0] * (0.25 + pullIntensity * 0.15);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      glow.moveTo(cx + ca * rOut, cy + sa * rOut);
+      glow.lineTo(cx + ca * rIn, cy + sa * rIn);
+    }
+    glow.lineStyle(0);
+
+    // 중심 이벤트 호라이즌 경고 (순흑 disk + violet rim — 큰 흰 flash 금지)
+    const coreR = 30 + pullIntensity * 26;
+    glow.beginFill(lerpDarkColor(0.30), 0.32 * pullIntensity);
+    glow.drawCircle(cx, cy, coreR * 1.45);
+    glow.endFill();
+    g.lineStyle(2.0, lerpDarkColor(0.15), 0.55 + pullIntensity * 0.35);
+    g.drawCircle(cx, cy, coreR);
+    g.lineStyle(0);
+    g.beginFill(0x000000, 0.75 + pullIntensity * 0.20);
+    g.drawCircle(cx, cy, coreR * 0.55);
+    g.endFill();
+    // 중심 tiny violet dot (crisp)
+    g.beginFill(lerpDarkColor(0.22), 0.88);
+    g.drawCircle(cx, cy, 2.6 + pullIntensity * 1.4);
+    g.endFill();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Rift seam — spacetime 찢어짐. 보스→끝점 따라 jitter된 violet 누출광 + mesh shard.
+// ═══════════════════════════════════════════════════════════════════
+function drawRiftSeam(
+  g: PIXI.Graphics, glow: PIXI.Graphics,
+  sx: number, sy: number, tx: number, ty: number,
+  pulse: number, t: number,
+) {
+  const dxn = tx - sx, dyn = ty - sy;
+  const L = Math.hypot(dxn, dyn) || 1;
+  const dx = dxn / L, dy = dyn / L;
+  const perpX = -dy, perpY = dx;
+  // ── 찢어진 검은 band (여러 jagged 세그먼트) ──
+  const segs = 28;
+  let seed = Math.floor(t * 0.4) | 0;
+  // outer violet leak glow (ADD, subtle)
+  glow.lineStyle(16 * pulse + 4, lerpDarkColor(0.28), 0.22 * pulse);
+  glow.moveTo(sx, sy);
+  for (let i = 1; i <= segs; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const frac = i / segs;
+    const jit = ((seed % 131) / 131 - 0.5) * 4.5;
+    glow.lineTo(sx + dxn * frac + perpX * jit, sy + dyn * frac + perpY * jit);
+  }
+  glow.lineStyle(0);
+  // dark seam stroke (여러 겹 — 찢어진 검은 선)
+  seed = Math.floor(t * 0.4) | 0;
+  g.lineStyle(7 * pulse + 1.8, lerpDarkColor(0.92), 0.85 * pulse);
+  g.moveTo(sx, sy);
+  for (let i = 1; i <= segs; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const frac = i / segs;
+    const jit = ((seed % 131) / 131 - 0.5) * 6.0;
+    g.lineTo(sx + dxn * frac + perpX * jit, sy + dyn * frac + perpY * jit);
+  }
+  seed = Math.floor(t * 0.4) | 0;
+  g.lineStyle(3.5 * pulse + 1.0, 0x000000, 0.92 * pulse);
+  g.moveTo(sx, sy);
+  for (let i = 1; i <= segs; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const frac = i / segs;
+    const jit = ((seed % 131) / 131 - 0.5) * 5.0;
+    g.lineTo(sx + dxn * frac + perpX * jit, sy + dyn * frac + perpY * jit);
+  }
+  // 심선 violet leak (crisp pinstripe)
+  seed = Math.floor(t * 0.4) | 0;
+  g.lineStyle(1.2 * pulse + 0.3, lerpDarkColor(0.15), 0.92 * pulse);
+  g.moveTo(sx, sy);
+  for (let i = 1; i <= segs; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const frac = i / segs;
+    const jit = ((seed % 131) / 131 - 0.5) * 4.0;
+    g.lineTo(sx + dxn * frac + perpX * jit, sy + dyn * frac + perpY * jit);
+  }
+  g.lineStyle(0);
+  // ── 좌우로 튀어나온 mesh shard들 (seam 양옆) ──
+  seed = (Math.floor(t * 0.2) + 71) | 0;
+  for (let i = 0; i < 16; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const frac = 0.1 + ((seed % 97) / 97) * 0.80;
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const side = ((seed % 97) / 97 - 0.5) * 28;      // ±14px 좌우
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    const shardR = 3.5 + ((seed % 59) / 59) * 4.5;   // 3.5~8
+    const sxx = sx + dxn * frac + perpX * side;
+    const syy = sy + dyn * frac + perpY * side;
+    const shardRot = Math.atan2(dy, dx) + (side > 0 ? 0.6 : -0.6);
+    drawMeshShard(g, sxx, syy, shardR, shardRot, pulse);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Rift burst — 각 hit point에서 튀어나오는 mesh fragment burst (6-point).
+// ═══════════════════════════════════════════════════════════════════
+function drawRiftBurst(
+  g: PIXI.Graphics, glow: PIXI.Graphics,
+  cx: number, cy: number, R: number,
+  pulse: number, t: number,
+) {
+  // subtle violet halo (절제 — 큰 원 fill 금지)
+  glow.beginFill(lerpDarkColor(0.24), 0.30 * pulse);
+  glow.drawCircle(cx, cy, R * 0.80);
+  glow.endFill();
+  // 6개 mesh shard 방사
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + t * 0.03;
+    const expand = (1 - pulse) * R * 0.6;
+    const sx = cx + Math.cos(a) * (R * 0.55 + expand);
+    const sy = cy + Math.sin(a) * (R * 0.55 + expand);
+    drawMeshShard(g, sx, sy, R * 0.30, a + 1.2, pulse);
+  }
+  // 중심 dark dot (순흑 — 이벤트 호라이즌 축소판)
+  g.beginFill(0x000000, 0.88 * pulse);
+  g.drawCircle(cx, cy, R * 0.22);
+  g.endFill();
+  // violet rim
+  g.lineStyle(1.4 * pulse + 0.3, lerpDarkColor(0.20), 0.72 * pulse);
+  g.drawCircle(cx, cy, R * 0.30);
+  g.lineStyle(0);
+}
+
 // ── 지그재그 번개 — deterministic LCG seed 기반 jagged line ──
 function drawZigzagBolt(
   g: PIXI.Graphics,
@@ -1164,6 +1719,150 @@ function lerpLightColor(tFrac: number): number {
   }
   const [, r, g, b] = LIGHT_STOPS[LIGHT_STOPS.length - 1];
   return (r << 16) | (g << 8) | b;
+}
+
+// ── Hex polygon outline 헬퍼 (anchor prism core 등) ──
+function drawHexPoly(g: PIXI.Graphics, cx: number, cy: number, R: number, rot: number) {
+  for (let i = 0; i <= 6; i++) {
+    const a = rot + (i / 6) * Math.PI * 2;
+    const hx = cx + Math.cos(a) * R;
+    const hy = cy + Math.sin(a) * R;
+    if (i === 0) g.moveTo(hx, hy); else g.lineTo(hx, hy);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Photon mote — 빛 보스 공격의 원자 입자.
+//   4-point 금색 별 + 역회전 내부 십자 + crisp 코어 dot.
+//   ADD glow로 bloom, 흰 배경 대응을 위해 어두운 gold(yellow-700~800) 윤곽 사용.
+//   — 플레이어 빛 스킬의 부드러운 원과 차별화된 "공학적" 입자 디자인.
+// ═══════════════════════════════════════════════════════════════════
+function drawPhotonMote(
+  g: PIXI.Graphics, glow: PIXI.Graphics,
+  cx: number, cy: number, R: number,
+  rot: number, intensity: number,
+) {
+  // ── ADD bloom halo (soft, ring 계열 — 큰 원 fill 금지) ──
+  glow.beginFill(lerpLightColor(0.45), 0.20 * intensity);
+  glow.drawCircle(cx, cy, R * 2.4);
+  glow.endFill();
+  glow.beginFill(lerpLightColor(0.30), 0.32 * intensity);
+  glow.drawCircle(cx, cy, R * 1.35);
+  glow.endFill();
+
+  // ── 4-point star outline (crisp, 회전) ──
+  const OUTER = R * 1.30;
+  const INNER = R * 0.46;
+  const pts: number[] = [];
+  for (let i = 0; i < 8; i++) {
+    const a = rot + (i / 8) * Math.PI * 2;
+    const rr = (i % 2 === 0) ? OUTER : INNER;
+    pts.push(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+  }
+  g.beginFill(lerpLightColor(0.60), 0.30 + intensity * 0.32);
+  g.drawPolygon(pts);
+  g.endFill();
+  g.lineStyle(1.3, lerpLightColor(0.82), 0.62 + intensity * 0.32);
+  g.drawPolygon(pts);
+  g.lineStyle(0);
+
+  // ── 내부 십자 (역회전) — 원자 느낌 강조 ──
+  const crossRot = -rot * 1.55;
+  const armR = R * 0.92;
+  g.lineStyle(0.9, lerpLightColor(0.45), 0.60 + intensity * 0.30);
+  for (let a = 0; a < 4; a++) {
+    const aa = crossRot + a * Math.PI / 2;
+    g.moveTo(cx, cy);
+    g.lineTo(cx + Math.cos(aa) * armR, cy + Math.sin(aa) * armR);
+  }
+  g.lineStyle(0);
+
+  // ── crisp 코어 dot (작게 — 큰 흰 원 금지) ──
+  g.beginFill(lerpLightColor(0.15), 0.92);
+  g.drawCircle(cx, cy, R * 0.32);
+  g.endFill();
+  g.beginFill(lerpLightColor(0.02), 0.80 + intensity * 0.20);
+  g.drawCircle(cx, cy, R * 0.16);
+  g.endFill();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 빛 레이저 — 5겹 stroke (ADD halo + mid + core). width = 기준 두께.
+//   rect fill 금지 (선 stroke만 사용 — 흰색 사각형 플래시 방지).
+// ═══════════════════════════════════════════════════════════════════
+function drawLightBeam(
+  g: PIXI.Graphics, glow: PIXI.Graphics,
+  sx: number, sy: number, tx: number, ty: number,
+  width: number,
+  pulse: number,   // 1→0 페이드
+) {
+  const bulge = 0.85 + pulse * 0.32;  // 초기 1.17 → 0.85 수축
+
+  // ADD bloom halo (2겹)
+  glow.lineStyle(width * 2.30 * bulge, lerpLightColor(0.45), 0.22 * pulse);
+  glow.moveTo(sx, sy); glow.lineTo(tx, ty);
+  glow.lineStyle(width * 1.25 * bulge, lerpLightColor(0.30), 0.40 * pulse);
+  glow.moveTo(sx, sy); glow.lineTo(tx, ty);
+  glow.lineStyle(0);
+
+  // crisp layered stroke
+  g.lineStyle(width * 0.85 * bulge, lerpLightColor(0.52), 0.62 * pulse);
+  g.moveTo(sx, sy); g.lineTo(tx, ty);
+  g.lineStyle(width * 0.48 * bulge, lerpLightColor(0.28), 0.82 * pulse);
+  g.moveTo(sx, sy); g.lineTo(tx, ty);
+  g.lineStyle(width * 0.22 * bulge, lerpLightColor(0.10), 0.94 * pulse);
+  g.moveTo(sx, sy); g.lineTo(tx, ty);
+  // 심선 (pinstripe — 밝지만 pure white 아님, yellow-200)
+  g.lineStyle(Math.max(0.9, width * 0.09), lerpLightColor(0.02), 0.98 * pulse);
+  g.moveTo(sx, sy); g.lineTo(tx, ty);
+  g.lineStyle(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 빛 스파크 버스트 — 6점 asterisk + thin ring (원형 fill flash 금지).
+// ═══════════════════════════════════════════════════════════════════
+function drawLightSparkBurst(
+  g: PIXI.Graphics, glow: PIXI.Graphics,
+  cx: number, cy: number, R: number,
+  rot: number,
+  pulse: number,
+) {
+  // 작은 ADD 코어 (큰 원 fill 금지 — R*0.4 이하로 제한)
+  glow.beginFill(lerpLightColor(0.45), 0.50 * pulse);
+  glow.drawCircle(cx, cy, R * 0.38);
+  glow.endFill();
+  glow.beginFill(lerpLightColor(0.25), 0.70 * pulse);
+  glow.drawCircle(cx, cy, R * 0.20);
+  glow.endFill();
+
+  // 6-point 날카로운 rays (내부 gap 둬서 hollow 느낌)
+  g.lineStyle(2.4 * pulse + 0.5, lerpLightColor(0.20), 0.88 * pulse);
+  for (let i = 0; i < 6; i++) {
+    const a = rot + i * Math.PI / 3;
+    const c = Math.cos(a), s = Math.sin(a);
+    g.moveTo(cx + c * R * 0.22, cy + s * R * 0.22);
+    g.lineTo(cx + c * R, cy + s * R);
+  }
+  // 더 얇은 6점 (회전 offset — sparkle 느낌)
+  g.lineStyle(1.2 * pulse + 0.3, lerpLightColor(0.50), 0.62 * pulse);
+  for (let i = 0; i < 6; i++) {
+    const a = rot + Math.PI / 6 + i * Math.PI / 3;
+    const c = Math.cos(a), s = Math.sin(a);
+    g.moveTo(cx + c * R * 0.18, cy + s * R * 0.18);
+    g.lineTo(cx + c * R * 0.72, cy + s * R * 0.72);
+  }
+  g.lineStyle(0);
+
+  // Thin 확장 ring (stroke only, fill 없음)
+  const ringR = R * (0.60 + (1 - pulse) * 0.35);
+  g.lineStyle(1.4 * pulse + 0.3, lerpLightColor(0.42), 0.68 * pulse);
+  g.drawCircle(cx, cy, ringR);
+  g.lineStyle(0);
+
+  // 중심 tiny dot (crisp, yellow-400 — pure white 금지)
+  g.beginFill(lerpLightColor(0.20), 0.92 * pulse);
+  g.drawCircle(cx, cy, R * 0.10);
+  g.endFill();
 }
 
 // ── Gold plate (빛 공격 endpoint marker — diamond plate의 warm 버전) ──
@@ -2156,57 +2855,80 @@ function drawBossProjectile(g: PIXI.Graphics, glow: PIXI.Graphics, p: GameState[
       glow.endFill();
       break;
     }
-    case 'light_halo': {
-      // Halo Ring moving photon — gold diamond plate + 진행 방향 꼬리 없음.
-      //    delay 끝난 뒤 vx/vy로 바깥 확장. 이동하면서 crisp plate 유지.
-      drawGoldPlate(g, p.x, p.y, r * 0.70, 1.0);
-      // 중심 inner ring (빛 느낌 보강)
-      g.lineStyle(1.4, lerpLightColor(0.32), 0.85);
-      g.drawCircle(p.x, p.y, r * 0.85);
+    case 'light_collapse_mote': {
+      // Stellar Collapse 중심으로 돌진 중 photon mote. 꼬리(역velocity) + photon star head.
+      const vx = p.vx, vy = p.vy;
+      const speedSq = vx * vx + vy * vy;
+      const speed = speedSq > 0.01 ? Math.sqrt(speedSq) : 1;
+      const invSpeed = 1 / speed;
+      const tDx = -vx * invSpeed, tDy = -vy * invSpeed;
+      // glow 꼬리 (작고 dense — ADD blend로 광행 표현)
+      for (let tk = 1; tk <= 5; tk++) {
+        const tx = p.x + tDx * tk * 5.0;
+        const ty = p.y + tDy * tk * 5.0;
+        glow.beginFill(lerpLightColor(0.40), 0.40 * (1 - tk / 6));
+        glow.drawCircle(tx, ty, r * (0.34 - tk * 0.055));
+        glow.endFill();
+      }
+      // crisp line trail (머리 뒤쪽 짧은 금색 선)
+      g.lineStyle(2.0, lerpLightColor(0.30), 0.72);
+      g.moveTo(p.x, p.y);
+      g.lineTo(p.x + tDx * 24, p.y + tDy * 24);
+      g.lineStyle(1.0, lerpLightColor(0.10), 0.88);
+      g.moveTo(p.x, p.y);
+      g.lineTo(p.x + tDx * 14, p.y + tDy * 14);
       g.lineStyle(0);
+      // photon star head (크고 밝게)
+      const rot = Math.atan2(vy, vx) + Math.PI / 4;
+      drawPhotonMote(g, glow, p.x, p.y, r * 0.55, rot, 1.0);
       break;
     }
-    case 'dark_tendril': {
-      // 촉수 — 머리 + 꼬리 (트레일)
-      g.beginFill(0x020010, 0.88);
-      g.drawCircle(p.x, p.y, r);
-      g.endFill();
-      g.beginFill(0x3b0764, 0.85);
-      g.drawCircle(p.x, p.y, r * 0.65);
-      g.endFill();
-      g.beginFill(0x7e22ce, 0.85);
-      g.drawCircle(p.x, p.y, r * 0.35);
-      g.endFill();
-      // 꼬리 (반대 방향)
-      const ta = Math.atan2(-p.vy, -p.vx);
-      for (let k = 1; k <= 4; k++) {
-        const td = k * 5;
-        const tx = p.x + Math.cos(ta) * td;
-        const ty = p.y + Math.sin(ta) * td;
-        g.beginFill(0x3b0764, 0.6 - k * 0.12);
-        g.drawCircle(tx, ty, r * (1 - k * 0.18));
+    case 'dark_accretion_jet': {
+      // Accretion Jet — log-spiral 바깥 비행. 보스 body의 infalling particle을 역전한 감각:
+      //    violet 코어 + 작은 흰 head + 뒤로 4단계 trail.
+      const vx = p.vx, vy = p.vy;
+      const speedSq = vx * vx + vy * vy;
+      const speed = speedSq > 0.01 ? Math.sqrt(speedSq) : 1;
+      const invSpeed = 1 / speed;
+      const tDx = -vx * invSpeed, tDy = -vy * invSpeed;  // 뒤쪽 (origin 방향)
+      // fading trail 4단 (뒤로 갈수록 dim)
+      for (let tk = 1; tk <= 4; tk++) {
+        const tx = p.x + tDx * tk * 5.0;
+        const ty = p.y + tDy * tk * 5.0;
+        const fade = (5 - tk) / 5;
+        // soft violet bloom
+        glow.beginFill(lerpDarkColor(0.26), 0.38 * fade);
+        glow.drawCircle(tx, ty, r * (0.42 - tk * 0.06));
+        glow.endFill();
+        // crisp violet core
+        g.beginFill(lerpDarkColor(0.42), 0.55 * fade);
+        g.drawCircle(tx, ty, r * (0.30 - tk * 0.045));
         g.endFill();
       }
+      // 현재 위치: 외곽 soft bloom
+      glow.beginFill(lerpDarkColor(0.22), 0.55);
+      glow.drawCircle(p.x, p.y, r * 1.55);
+      glow.endFill();
+      glow.beginFill(lerpDarkColor(0.08), 0.70);
+      glow.drawCircle(p.x, p.y, r * 0.90);
+      glow.endFill();
+      // violet core
+      g.beginFill(lerpDarkColor(0.30), 0.88);
+      g.drawCircle(p.x, p.y, r * 0.60);
+      g.endFill();
+      // 작은 흰 head (pure white 허용 — 1.5px 이하 pinpoint)
+      g.beginFill(0xffffff, 0.94);
+      g.drawCircle(p.x, p.y, r * 0.22);
+      g.endFill();
       break;
     }
-    case 'dark_void': {
-      // 검은 구체
-      g.beginFill(0x020010, 0.25);
-      g.drawCircle(p.x, p.y, r + 10);
-      g.endFill();
-      g.beginFill(0x020010, 0.98);
-      g.drawCircle(p.x, p.y, r);
-      g.endFill();
-      g.beginFill(0x3b0764, 0.85);
-      g.drawCircle(p.x, p.y, r * 0.7);
-      g.endFill();
-      g.beginFill(0x7e22ce, 0.7);
-      g.drawCircle(p.x, p.y, r * 0.4);
-      g.endFill();
-      // 중심에 빨간 포인트
-      g.beginFill(0xdc2626, 0.95);
-      g.drawCircle(p.x, p.y, r * 0.12);
-      g.endFill();
+    case 'dark_mesh_pull': {
+      // Mesh Pull CONTRACT phase — 팽창했던 mesh가 보스로 수축하며 끌어당기는 중.
+      //    life 55→0 구간이 contract. progress = 1 - life/55.
+      const CONTRACT = 55;
+      const lifeClamped = Math.max(0, Math.min(CONTRACT, p.life));
+      const progress = 1 - lifeClamped / CONTRACT;
+      drawSpacetimeMesh(g, glow, p.x, p.y, t, 'contract', progress);
       break;
     }
     default: {

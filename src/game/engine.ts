@@ -976,122 +976,225 @@ export class GameEngine {
   }
 
   // ── Photon Core (빛 보스) ──
-  // A. Prism Refraction : 보스→midpoint main beam + midpoint에서 3갈래 split
-  // B. Halo Ring        : 보스 주위 8 photon node가 ring 형태로 expanding
-  // C. Sun Pillar       : 플레이어 위치에 위에서 수직 빛 기둥 낙하
+  // A. Stellar Convergence : 24 photon mote가 보스로 나선 수렴 → 단일 고출력 레이저
+  // B. Prism Cascade       : 보스 양옆에 3 emitter → 동시 평행 레이저 발사
+  // C. Stellar Collapse    : 플레이어 잠금점 주위 링 모트 → 중심으로 돌진
   private bossAttackLight(e: EnemyState, player: PlayerState, diff: number) {
     const roll = Math.random();
     const dx = player.x - e.x;
     const dy = player.y - e.y;
     const dist = Math.sqrt(dx * dx + dy * dy) || 1;
     const dirX = dx / dist, dirY = dy / dist;
-    const base = Math.atan2(dy, dx);
 
     if (roll < 0.40) {
-      // A. Prism Refraction — main beam + 3 branches at midpoint.
-      //    4 projectiles: main (boss→midpoint), 3 branches (midpoint→endpoint).
-      const midDist = dist * 0.60;               // midpoint = 보스→player 60% 지점
-      const midX = e.x + dirX * midDist;
-      const midY = e.y + dirY * midDist;
-      const SPREAD = Math.PI / 9;                // 20° spread
-      const BRANCH_LEN = dist * 0.75;            // branch 길이 — player 너머까지
-      // Main beam
-      const prM = this.acquireEnemyProjectile(); if (!prM) return;
-      this.initProjectile(prM, midX, midY, 0, 0,
-        16, 16 * diff, 84, 0xd97706, 'light_prism_main');
-      prM.delay = 60;
-      prM.originX = e.x;
-      prM.originY = e.y;
-      // 3 branches (각도 -SPREAD, 0, +SPREAD)
-      for (let k = -1; k <= 1; k++) {
-        const branchAng = base + k * SPREAD;
-        const endX = midX + Math.cos(branchAng) * BRANCH_LEN;
-        const endY = midY + Math.sin(branchAng) * BRANCH_LEN;
-        const prB = this.acquireEnemyProjectile(); if (!prB) break;
-        // branch hit point 는 중간
-        const hitX = midX + Math.cos(branchAng) * BRANCH_LEN * 0.55;
-        const hitY = midY + Math.sin(branchAng) * BRANCH_LEN * 0.55;
-        this.initProjectile(prB, hitX, hitY, 0, 0,
-          16, 18 * diff, 84, 0xd97706, 'light_prism_branch');
-        prB.delay = 60;                          // main과 동시 strike
-        prB.originX = midX;                      // branch 시작점
-        prB.originY = midY;
-        prB.targetX = endX;                      // branch 끝점 (렌더에서 전체 선 그림)
-        prB.targetY = endY;
+      // A. Stellar Convergence
+      //    Telegraph: 40 photon mote가 반경 150~290 링에서 보스로 나선 수렴.
+      //      shrinkRate / 초기 반경 / spinSpeed 전부 mote별 무작위 → 연속 스트림 감각.
+      //      rotating prism anchor가 보스 위치에서 코어 형성.
+      //    Strike: 보스→player 방향 단일 laser, 축 위 4 hit point (첫 projectile이 빔 렌더).
+      const CHARGE = 90;
+      const BEAM_LEN = dist + 640;                 // player 너머까지 관통
+      const endX = e.x + dirX * BEAM_LEN;
+      const endY = e.y + dirY * BEAM_LEN;
+
+      // boss 위치 anchor (rotating prism core, visual only)
+      const prA = this.acquireEnemyProjectile(); if (prA) {
+        this.initProjectile(prA, e.x, e.y, 0, 0,
+          26, 0, CHARGE, 0xca8a04, 'light_convergence_anchor');
+        prA.delay = CHARGE;
+      }
+
+      // photon mote 스트림 — 40개, 각자 초기 반경/감쇠율/자전속도 무작위
+      const MOTES = 40;
+      for (let k = 0; k < MOTES; k++) {
+        const pr = this.acquireEnemyProjectile(); if (!pr) break;
+        const ang = Math.random() * Math.PI * 2;
+        const r0 = 150 + Math.random() * 140;       // 150~290 — 넓은 초기 범위
+        const sx = e.x + Math.cos(ang) * r0;
+        const sy = e.y + Math.sin(ang) * r0;
+        this.initProjectile(pr, sx, sy, 0, 0,
+          5, 0, CHARGE, 0xca8a04, 'light_convergence_mote');  // damage 0
+        pr.delay = CHARGE;
+        pr.originX = e.x;
+        pr.originY = e.y;
+        pr.spinAngle = ang;
+        pr.spinSpeed = 0.035 + Math.random() * 0.060;  // 자전 — mote별 다름
+        pr.orbitRadius = r0;
+        // shrinkRate 0.948~0.976 — 낮을수록 빠르게 수렴(조기 도착), 높을수록 느리게(늦게 도착)
+        pr.shrinkRate = 0.948 + Math.random() * 0.028;
+      }
+
+      // 4 hit point along beam line (frac 0.25~0.81)
+      const HIT_POINTS = 4;
+      for (let k = 0; k < HIT_POINTS; k++) {
+        const pr = this.acquireEnemyProjectile(); if (!pr) break;
+        const frac = 0.25 + (k / HIT_POINTS) * 0.72;
+        const hx = e.x + dirX * BEAM_LEN * frac;
+        const hy = e.y + dirY * BEAM_LEN * frac;
+        this.initProjectile(pr, hx, hy, 0, 0,
+          30, 22 * diff, CHARGE + 22, 0xca8a04, 'light_convergence_beam');
+        pr.delay = CHARGE;
+        pr.originX = e.x;
+        pr.originY = e.y;
+        pr.targetX = endX;
+        pr.targetY = endY;
       }
 
     } else if (roll < 0.75) {
-      // B. Halo Ring — 보스 주위 8 photon node, 확장 링 방사.
-      //    telegraph (ring outline 형성) → strike (확장 이동 + hit).
-      const NODES = 8;
-      const START_R = 80;                         // 시작 반경
-      const rotJit = Math.random() * Math.PI * 2;
-      for (let k = 0; k < NODES; k++) {
-        const ang = rotJit + (k / NODES) * Math.PI * 2;
-        const sx = e.x + Math.cos(ang) * START_R;
-        const sy = e.y + Math.sin(ang) * START_R;
-        const vspd = 2.8;
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        this.initProjectile(pr, sx, sy,
-          Math.cos(ang) * vspd, Math.sin(ang) * vspd,
-          14, 14 * diff, 110, 0xd97706, 'light_halo');
-        pr.delay = 50;                            // 50f telegraph — node 형성 (이동 X)
-        pr.originX = e.x;                         // 보스 중심 (링 center)
-        pr.originY = e.y;
-        pr.spinAngle = ang;                       // 반경 방향 저장
-        pr.travelFramesLeft = undefined;          // (delay 끝나면 표준 vx/vy 이동)
+      // B. Prism Cascade
+      //    Telegraph: 3 emitter mote가 보스→player 축에 수직 offset (-94, 0, +94)로 떠 있음.
+      //    Strike: 3개가 동시에 player 방향으로 평행 laser 발사.
+      const CHARGE = 55;
+      const BEAM_LEN = dist + 520;
+      const perpX = -dirY, perpY = dirX;
+      const OFFSETS = [-94, 0, 94];
+      const beamAng = Math.atan2(dirY, dirX);
+
+      for (const off of OFFSETS) {
+        const ox = e.x + perpX * off;
+        const oy = e.y + perpY * off;
+        const ex = ox + dirX * BEAM_LEN;
+        const ey = oy + dirY * BEAM_LEN;
+
+        // emitter mote (damage 0 — strike 중 beam 렌더링 담당)
+        const pm = this.acquireEnemyProjectile(); if (!pm) break;
+        this.initProjectile(pm, ox, oy, 0, 0,
+          10, 0, CHARGE + 22, 0xca8a04, 'light_prism_mote');
+        pm.delay = CHARGE;
+        pm.originX = e.x;                            // 보스 side (thin 뼈대 선)
+        pm.originY = e.y;
+        pm.targetX = ex;                             // beam 끝 (strike 시 렌더)
+        pm.targetY = ey;
+        pm.spinAngle = beamAng;                      // beam 방향
+
+        // 3 hit point per beam (beam 축 위)
+        for (let k = 0; k < 3; k++) {
+          const pr = this.acquireEnemyProjectile(); if (!pr) break;
+          const frac = 0.30 + k * 0.26;              // 0.30, 0.56, 0.82
+          const hx = ox + dirX * BEAM_LEN * frac;
+          const hy = oy + dirY * BEAM_LEN * frac;
+          this.initProjectile(pr, hx, hy, 0, 0,
+            22, 16 * diff, CHARGE + 22, 0xca8a04, 'light_prism_beam');
+          pr.delay = CHARGE;
+          pr.originX = ox;
+          pr.originY = oy;
+        }
       }
 
     } else {
-      // C. Sun Pillar — 플레이어 위치에 수직 빛 기둥. 위에서 내려옴 telegraph.
-      const pr = this.acquireEnemyProjectile(); if (!pr) return;
-      this.initProjectile(pr, player.x, player.y, 0, 0,
-        26, 26 * diff, 84, 0xd97706, 'light_pillar');
-      pr.delay = 60;                              // 60f telegraph
+      // C. Stellar Collapse
+      //    Telegraph: 플레이어 위치 잠금. 반경 240 링에 10 photon mote 배치 (회전 대기).
+      //    Strike: 모트 전부 동시에 중심으로 돌진 (각자 hit 투사체 + 꼬리).
+      const CHARGE = 80;
+      const RING_R = 240;
+      const NODES = 10;
+      const rotJit = Math.random() * Math.PI * 2;
+      const lockX = player.x;
+      const lockY = player.y;
+      const STRIKE_FRAMES = 20;                      // 표준 cap
+      const vspd = RING_R / STRIKE_FRAMES;           // 20f에 중심 도달
+
+      // anchor (ring outline + lockpoint crosshair, visual only)
+      const pa = this.acquireEnemyProjectile(); if (pa) {
+        this.initProjectile(pa, lockX, lockY, 0, 0,
+          RING_R, 0, CHARGE, 0xca8a04, 'light_collapse_anchor');
+        pa.delay = CHARGE;
+      }
+
+      for (let k = 0; k < NODES; k++) {
+        const ang = rotJit + (k / NODES) * Math.PI * 2;
+        const sx = lockX + Math.cos(ang) * RING_R;
+        const sy = lockY + Math.sin(ang) * RING_R;
+        const pr = this.acquireEnemyProjectile(); if (!pr) break;
+        // strike 시 적용될 velocity — 중심 방향
+        this.initProjectile(pr, sx, sy,
+          -Math.cos(ang) * vspd, -Math.sin(ang) * vspd,
+          18, 16 * diff, CHARGE + STRIKE_FRAMES + 4, 0xca8a04, 'light_collapse_mote');
+        pr.delay = CHARGE;
+        pr.originX = lockX;                          // lockpoint 참조
+        pr.originY = lockY;
+        pr.spinAngle = ang;                          // radial 방향 저장 (render용)
+      }
     }
   }
 
-  // ── 암흑 보스 공격 ──
+  // ── Event Horizon (암흑 보스) ──
+  // A. Accretion Jet     : 짧은 wind-up 후 12발 log-spiral로 바깥 분출 (coil 모티프 역전)
+  // B. Spacetime Rift    : 보스→플레이어 너머 직선 rift, 찢어진 seam + mesh fragment
+  // C. Event Horizon Pulse: 보스 중심 expanding mesh ring shockwave
   private bossAttackDark(e: EnemyState, player: PlayerState, diff: number) {
     const roll = Math.random();
     const dx = player.x - e.x;
     const dy = player.y - e.y;
-    const base = Math.atan2(dy, dx);
-    if (roll < 0.45) {
-      // 1. 촉수 4방향 (휘는 궤적)
-      const n = 4 + Math.floor(diff);
-      for (let k = 0; k < n; k++) {
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const dirX = dx / dist, dirY = dy / dist;
+
+    if (roll < 0.40) {
+      // A. Accretion Jet — 40f wind-up → 12 projectile이 log-spiral로 바깥 분출.
+      //    per-frame: orbitRadius *= 1.022 (확장), spinAngle += spinSpeed.
+      //    coil 방향(좌/우)은 spawn마다 랜덤.
+      const TELEGRAPH = 40;
+      const JET_LIFE = 140;
+      const JET_COUNT = 12;
+      const rotJit = Math.random() * Math.PI * 2;
+      const spinDir = Math.random() < 0.5 ? 1 : -1;
+
+      // wind-up anchor (visual only)
+      const pa = this.acquireEnemyProjectile(); if (pa) {
+        this.initProjectile(pa, e.x, e.y, 0, 0,
+          28, 0, TELEGRAPH, 0x0f172a, 'dark_accretion_anchor');
+        pa.delay = TELEGRAPH;
+      }
+
+      // 12 jet 투사체 — 각자 다른 launch angle, 같은 spin 방향
+      for (let k = 0; k < JET_COUNT; k++) {
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = base + (k - (n - 1) / 2) * 0.28;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 3.8, Math.sin(ang) * 3.8,
-          9, 12 * diff, 170, 0x6d28d9, 'dark_tendril');
+        const ang = rotJit + (k / JET_COUNT) * Math.PI * 2;
+        this.initProjectile(pr, e.x, e.y, 0, 0,
+          10, 14 * diff, TELEGRAPH + JET_LIFE, 0x0f172a, 'dark_accretion_jet');
+        pr.delay = TELEGRAPH;
+        pr.originX = e.x;
+        pr.originY = e.y;
         pr.spinAngle = ang;
-        pr.spinSpeed = (k % 2 === 0 ? 1 : -1) * 0.04;
+        pr.spinSpeed = spinDir * (0.040 + Math.random() * 0.016);  // 각 jet별 살짝 다름
+        pr.orbitRadius = 16 + Math.random() * 10;                   // 초기 반경 16~26
       }
-    } else if (roll < 0.80) {
-      // 2. 검은 구체 1~2 (느리고 크다, 고대미지)
-      const count = 1 + Math.floor(diff / 2);
-      for (let k = 0; k < count; k++) {
+
+    } else if (roll < 0.70) {
+      // B. Spacetime Rift — 보스→플레이어 너머 직선 rift.
+      //    4 hit point (첫 projectile = 전체 seam 렌더).
+      const RIFT_LEN = dist + 320;
+      const endX = e.x + dirX * RIFT_LEN;
+      const endY = e.y + dirY * RIFT_LEN;
+      const HIT = 4;
+      for (let k = 0; k < HIT; k++) {
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = base + (k - count / 2) * 0.2;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 2.4, Math.sin(ang) * 2.4,
-          20, 22 * diff, 200, 0x1e1b4b, 'dark_void');
+        const frac = 0.22 + (k / HIT) * 0.68;   // 0.22, 0.39, 0.56, 0.73
+        const hx = e.x + dirX * RIFT_LEN * frac;
+        const hy = e.y + dirY * RIFT_LEN * frac;
+        this.initProjectile(pr, hx, hy, 0, 0,
+          28, 20 * diff, 55 + 22, 0x0f172a, 'dark_rift_beam');
+        pr.delay = 55;
+        pr.originX = e.x;
+        pr.originY = e.y;
+        pr.targetX = endX;
+        pr.targetY = endY;
       }
+
     } else {
-      // 3. 포털 스폰 — 보스 주변 3곳에 포털, 잠시 후 촉수 생성
-      const count = 3 + Math.floor(diff / 2);
-      for (let k = 0; k < count; k++) {
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = Math.random() * Math.PI * 2;
-        const r = 100 + Math.random() * 120;
-        this.initProjectile(pr,
-          e.x + Math.cos(ang) * r, e.y + Math.sin(ang) * r,
-          0, 0,
-          24, 16 * diff, 90, 0x3b0764, 'dark_portal');
-        pr.delay = 45 + Math.floor(k * 12);
-      }
+      // C. Mesh Pull — 보스의 시공간 mesh가 바깥으로 펼쳐졌다가 다시 수축하며 플레이어를 끌어당김.
+      //    phase = expand(45f) + hold(18f) + contract(55f).
+      //    expand/hold 동안 피해 없음 (시각만). contract 동안 pull + 이벤트 호라이즌 범위 hit.
+      //    총 life = 118, delay = 63 (expand+hold), contract는 delay 끝나고 life=55 유지.
+      const EXPAND = 45;
+      const HOLD = 18;
+      const CONTRACT = 55;
+      const pr = this.acquireEnemyProjectile(); if (!pr) return;
+      this.initProjectile(pr, e.x, e.y, 0, 0,
+        58, 22 * diff, EXPAND + HOLD + CONTRACT, 0x0f172a, 'dark_mesh_pull');
+      pr.delay = EXPAND + HOLD;
+      pr.originX = e.x;
+      pr.originY = e.y;
     }
   }
 
@@ -1117,12 +1220,24 @@ export class GameEngine {
             pr.travelFramesLeft = undefined;
           }
         }
+        // light_convergence_mote: telegraph 동안 origin(보스)으로 나선 수렴 (per-mote shrinkRate)
+        if (pr.variant === 'light_convergence_mote' && pr.orbitRadius !== undefined) {
+          pr.orbitRadius *= (pr.shrinkRate ?? 0.962);
+          pr.spinAngle = (pr.spinAngle ?? 0) + (pr.spinSpeed ?? 0.05);
+          pr.x = (pr.originX ?? pr.x) + Math.cos(pr.spinAngle) * pr.orbitRadius;
+          pr.y = (pr.originY ?? pr.y) + Math.sin(pr.spinAngle) * pr.orbitRadius;
+        }
         if (pr.life <= 0) { pr.active = false; continue; }
         continue;
       }
       if (pr.delay === 0) {
-        // 폭발 순간 — 플레이어 범위 내면 피해
         pr.delay = undefined;
+        // 비행-계속형: telegraph 후 자체 궤적으로 장시간 비행. delay-end damage/life cap 스킵,
+        //              다음 프레임부터 일반 update 경로가 per-frame hit check 담당.
+        if (pr.variant === 'dark_accretion_jet' || pr.variant === 'dark_mesh_pull') {
+          continue;
+        }
+        // 폭발 순간 — 플레이어 범위 내면 피해
         if (player.invincibleFrames <= 0) {
           const ddx = player.x - pr.x;
           const ddy = player.y - pr.y;
@@ -1133,6 +1248,35 @@ export class GameEngine {
         }
         // 폭발 시각 지속 잠시 유지 (life로 컨트롤), 이후 자연 소멸
         pr.life = Math.min(pr.life, 20);
+        continue;
+      }
+
+      // ── dark_mesh_pull: contract 단계 — 플레이어 끌어당김 + 이벤트 호라이즌 범위 연속 hit ──
+      //    projectile 위치(보스)는 고정, life만 55→0 수축 진행도로 해석됨 (렌더는 life 참조).
+      //    Pull: quadratic ramp (초반 gentle → 후반 escape velocity 초과) + 1/r 근접 가중.
+      if (pr.variant === 'dark_mesh_pull') {
+        const ox = pr.originX ?? pr.x;
+        const oy = pr.originY ?? pr.y;
+        const pdx = ox - player.x;
+        const pdy = oy - player.y;
+        const pdist = Math.sqrt(pdx * pdx + pdy * pdy) || 1;
+        const contractProg = Math.max(0, Math.min(1, 1 - pr.life / 55));
+        // 기본 ramp: 1.4 → 4.8 (player speed=2 초과하는 escape-velocity)
+        const base = 1.4 + Math.pow(contractProg, 1.6) * 3.4;
+        // 근접 가중 (<=180px): 가까울수록 중력 강화 (최대 1.8x)
+        const proxMult = 1 + Math.max(0, (180 - pdist) / 180) * 0.8;
+        const pullStrength = base * proxMult;
+        player.x += (pdx / pdist) * pullStrength;
+        player.y += (pdy / pdist) * pullStrength;
+        player.x = Math.max(PLAYER_WIDTH, Math.min(WORLD_W - PLAYER_WIDTH, player.x));
+        player.y = Math.max(PLAYER_HEIGHT, Math.min(WORLD_H - PLAYER_HEIGHT, player.y));
+        // 연속 hit — 이벤트 호라이즌 범위 내면 피해 (invincibleFrames가 도배 방지)
+        if (pdist < pr.radius + HIT_R && player.invincibleFrames <= 0) {
+          player.hp -= pr.damage;
+          player.invincibleFrames = INVINCIBLE_FRAMES;
+        }
+        pr.life--;
+        if (pr.life <= 0) pr.active = false;
         continue;
       }
 
@@ -1176,6 +1320,11 @@ export class GameEngine {
         pr.vy = pr.waveBaseVy ?? 0;
         pr.x += (pr.wavePerpX ?? 0) * dPerp;
         pr.y += (pr.wavePerpY ?? 0) * dPerp;
+      }
+
+      // dark_accretion_jet: log-spiral outward (orbitRadius 매 프레임 확장)
+      if (pr.variant === 'dark_accretion_jet' && pr.orbitRadius !== undefined) {
+        pr.orbitRadius *= 1.022;
       }
 
       // 위치 업데이트 — orbital (origin 중심 원궤도) OR linear.
