@@ -890,203 +890,222 @@ function drawLightBoss(g: PIXI.Graphics, r: number, t: number) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 6) 심연의 군주 (Dark Lord)
+// 6) Event Horizon (심연의 군주) — 시공간 격자(dark on white) + tight coil
+//    게임 floor 0xFAFBFC (near-white) 기준 팔레트.
 // ═══════════════════════════════════════════════════════════════════
 function drawDarkBoss(g: PIXI.Graphics, r: number, t: number) {
-  // ── 어둠 halo (5겹) ──
-  g.beginFill(0x020010, 0.32);
-  g.drawCircle(0, 0, r * 1.7);
-  g.endFill();
-  g.beginFill(0x0a0416, 0.30);
-  g.drawCircle(0, 0, r * 1.45);
-  g.endFill();
-  g.beginFill(0x1e1b4b, 0.28);
-  g.drawCircle(0, 0, r * 1.22);
-  g.endFill();
-  g.beginFill(0x3b0764, 0.22);
-  g.drawCircle(0, 0, r * 1.05);
-  g.endFill();
+  // 팔레트 — 흰 배경 대응: dark edges + subtle dark fills + pure black core
+  const C_BLACK    = 0x000000;
+  const C_SLATE_9  = 0x0f172a;  // 가장 진한 edge/fill
+  const C_SLATE_8  = 0x1e293b;
+  const C_SLATE_7  = 0x334155;  // 주 edge
+  const C_SLATE_5  = 0x64748b;  // dot halo, coil mid
+  const C_SLATE_4  = 0x94a3b8;  // subtle
+  const C_INDIGO_9 = 0x1e1b4b;  // fill variation (dark 속성 힌트)
+  const C_VIOLET_5 = 0x8b5cf6;  // accretion accent + particle
+  const C_WHITE    = 0xffffff;
 
-  // ── 그림자 연기 입자 (불규칙, 회전) ──
-  for (let k = 0; k < 12; k++) {
-    const a = (k / 12) * Math.PI * 2 + t * 0.018;
-    const sr = r * (1.15 + ((k * 7) % 5) * 0.06) + Math.sin(t * 0.06 + k) * 5;
-    const sx = Math.cos(a) * sr;
-    const sy = Math.sin(a) * sr;
-    g.beginFill(0x020010, 0.5);
-    g.drawCircle(sx, sy, 6 + (k % 3) * 1.5);
-    g.endFill();
-    g.beginFill(0x3b0764, 0.3);
-    g.drawCircle(sx, sy, 10 + (k % 3) * 2);
-    g.endFill();
-  }
-
-  // ── 하단 촉수 8개 (bezier, 휘어짐) ──
-  const tentacles = 8;
-  for (let i = 0; i < tentacles; i++) {
-    const baseA = Math.PI * 0.1 + (i / (tentacles - 1)) * Math.PI * 0.8;  // 하단 반원
-    const sway = Math.sin(t * 0.05 + i * 1.2) * 0.22;
-    const aRoot = baseA + sway;
-    const rootX = Math.cos(aRoot) * r * 0.82;
-    const rootY = Math.sin(aRoot) * r * 0.82;
-    const lenMul = 0.52 + Math.sin(t * 0.08 + i) * 0.14;
-    const tipX = rootX + Math.cos(aRoot + sway * 0.5) * r * lenMul;
-    const tipY = rootY + Math.sin(aRoot + sway * 0.5) * r * lenMul + r * 0.1;
-    const midX = (rootX + tipX) * 0.5 + Math.sin(t * 0.07 + i * 2) * 7;
-    const midY = (rootY + tipY) * 0.5 + r * 0.1;
-
-    // 촉수 — 여러 구간으로 두께 타퍼
-    const segs = 10;
-    let prevX = rootX, prevY = rootY;
-    for (let s = 1; s <= segs; s++) {
-      const tt = s / segs;
-      const mt = 1 - tt;
-      const bx = mt * mt * rootX + 2 * mt * tt * midX + tt * tt * tipX;
-      const by = mt * mt * rootY + 2 * mt * tt * midY + tt * tt * tipY;
-      const thick = r * 0.13 * (1 - tt * 0.88);
-      // 외곽
-      g.lineStyle(thick * 2.4, 0x020010, 0.95);
-      g.moveTo(prevX, prevY);
-      g.lineTo(bx, by);
-      // 중간
-      g.lineStyle(thick * 1.5, 0x1e1b4b, 0.85);
-      g.moveTo(prevX, prevY);
-      g.lineTo(bx, by);
-      // 보라 하이라이트
-      g.lineStyle(thick * 0.6, 0x581c87, 0.75);
-      g.moveTo(prevX, prevY);
-      g.lineTo(bx, by);
-      prevX = bx;
-      prevY = by;
+  // ══════════════════════════════════════════════════════════════════
+  //  1. 시공간 삼각 mesh — 5 ring, log-spacing, per-node seed jitter
+  // ══════════════════════════════════════════════════════════════════
+  const ringDefs = [
+    { count: 13, radius: 0.62, phaseOffset: 0.00, rWob: 0.08, aWob: 0.06 },
+    { count: 17, radius: 0.86, phaseOffset: 0.19, rWob: 0.09, aWob: 0.06 },
+    { count: 22, radius: 1.14, phaseOffset: 0.41, rWob: 0.10, aWob: 0.05 },
+    { count: 28, radius: 1.46, phaseOffset: 0.67, rWob: 0.11, aWob: 0.04 },
+    { count: 35, radius: 1.80, phaseOffset: 0.93, rWob: 0.12, aWob: 0.04 },
+  ];
+  const nodeX: number[] = [];
+  const nodeY: number[] = [];
+  const ringStart: number[] = [];
+  for (let ri = 0; ri < ringDefs.length; ri++) {
+    const ring = ringDefs[ri];
+    ringStart.push(nodeX.length);
+    for (let k = 0; k < ring.count; k++) {
+      const nodeSeed = ((k * 73 + ri * 53) % 97) / 97;
+      const baseA = (k / ring.count) * Math.PI * 2 + ring.phaseOffset + (nodeSeed - 0.5) * 0.22;
+      const aWob = Math.sin(t * 0.009 + k * 1.7 + ring.phaseOffset * 4) * ring.aWob;
+      const rWob = 1 + Math.sin(t * 0.011 + k * 0.83 + ring.phaseOffset * 6) * ring.rWob
+                     + (nodeSeed - 0.5) * 0.14;
+      const aa = baseA + aWob;
+      const rr = r * ring.radius * rWob;
+      nodeX.push(Math.cos(aa) * rr);
+      nodeY.push(Math.sin(aa) * rr);
     }
-    g.lineStyle(0);
-    // 촉수 끝 (suction cup)
-    g.beginFill(0x3b0764, 0.92);
-    g.drawCircle(tipX, tipY, 3);
-    g.endFill();
-    g.beginFill(0x7e22ce, 0.78);
-    g.drawCircle(tipX, tipY, 1.5);
-    g.endFill();
+  }
+  ringStart.push(nodeX.length);
+
+  // 1a) Triangle FILLS — inter-ring fan triangulation, seed-based subtle shade 변주.
+  //     LCG로 alpha 0.02~0.18, color 3-way (slate-8/slate-9/indigo-950) 결정.
+  //     흰 배경에서 셀마다 미묘하게 다른 gray tone → 중력 렌즈에 구겨진 종이 느낌.
+  for (let ri = 0; ri < ringDefs.length - 1; ri++) {
+    const aS = ringStart[ri], aE = ringStart[ri + 1];
+    const bS = ringStart[ri + 1], bE = ringStart[ri + 2];
+    const aCount = aE - aS;
+    const bCount = bE - bS;
+    let triSeed = (ri * 131 + 17) | 0;
+    for (let i = 0; i < aCount; i++) {
+      const a0x = nodeX[aS + i], a0y = nodeY[aS + i];
+      const iNext = (i + 1) % aCount;
+      const a1x = nodeX[aS + iNext], a1y = nodeY[aS + iNext];
+      const bStart = Math.floor((i / aCount) * bCount);
+      const bEnd = Math.floor(((i + 1) / aCount) * bCount);
+      // Fan: (A_i, B_j, B_{j+1}) for j ∈ [bStart, bEnd)
+      for (let j = bStart; j < bEnd; j++) {
+        const j0 = j % bCount, j1 = (j + 1) % bCount;
+        triSeed = (triSeed * 1103515245 + 12345) & 0x7fffffff;
+        const a = 0.02 + ((triSeed % 131) / 131) * 0.16;
+        const colorPick = (triSeed >> 8) % 3;
+        const col = colorPick === 0 ? C_SLATE_8 : colorPick === 1 ? C_SLATE_9 : C_INDIGO_9;
+        g.beginFill(col, a);
+        g.drawPolygon([a0x, a0y, nodeX[bS + j0], nodeY[bS + j0], nodeX[bS + j1], nodeY[bS + j1]]);
+        g.endFill();
+      }
+      // Bridge triangle: (A_i, A_{i+1}, B_bEnd)
+      triSeed = (triSeed * 1103515245 + 12345) & 0x7fffffff;
+      const bridgeA = 0.02 + ((triSeed % 131) / 131) * 0.16;
+      const bridgeC = (triSeed >> 8) % 3;
+      const bridgeCol = bridgeC === 0 ? C_SLATE_8 : bridgeC === 1 ? C_SLATE_9 : C_INDIGO_9;
+      const bEndJ = bEnd % bCount;
+      g.beginFill(bridgeCol, bridgeA);
+      g.drawPolygon([a0x, a0y, a1x, a1y, nodeX[bS + bEndJ], nodeY[bS + bEndJ]]);
+      g.endFill();
+    }
   }
 
-  // ── 본체 — 불규칙 비대칭 덩어리 (고정 seed + 느린 진동) ──
-  const massPts: Array<{ x: number; y: number }> = [];
-  const massSegs = 28;
-  const shadowSeed = [0.88, 1.05, 0.92, 1.08, 0.85, 1.1, 0.9, 1.04, 0.95, 1.02, 0.88, 1.06, 0.9, 1.08, 0.86, 1.12, 0.92, 1.04, 0.98, 0.88, 1.06, 0.94, 1.0, 0.9, 1.02, 0.87, 1.05, 0.93];
-  for (let i = 0; i < massSegs; i++) {
-    const a = (i / massSegs) * Math.PI * 2 - Math.PI / 2;
-    const baseShape = Math.sin(a) > 0 ? 0.98 : (0.75 + 0.25 * (1 + Math.sin(a)) / 2);  // 하단 둥글게 상단 뾰족
-    const jitter = shadowSeed[i] || 1;
-    const wobble = 1 + Math.sin(a * 3 + t * 0.04) * 0.035 + Math.sin(a * 7 - t * 0.06) * 0.02;
-    const rr = r * baseShape * jitter * wobble;
-    massPts.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr });
-  }
-
-  // 5겹 본체
-  g.beginFill(0x020010, 0.98);
-  g.drawPolygon(polygonPoints(massPts));
-  g.endFill();
-  g.beginFill(0x0a0416, 0.93);
-  g.drawPolygon(polygonPointsScaled(massPts, 0.9));
-  g.endFill();
-  g.beginFill(0x1e1b4b, 0.9);
-  g.drawPolygon(polygonPointsScaled(massPts, 0.75));
-  g.endFill();
-  g.beginFill(0x3b0764, 0.82);
-  g.drawPolygon(polygonPointsScaled(massPts, 0.55));
-  g.endFill();
-  g.beginFill(0x581c87, 0.7);
-  g.drawPolygon(polygonPointsScaled(massPts, 0.35));
-  g.endFill();
-
-  // ── 상단 뿔 2개 (날카로운, 휘어짐) ──
-  [-1, 1].forEach(side => {
-    const baseX = side * r * 0.45;
-    const baseY = -r * 0.55;
-    const tipX = side * r * 0.82;
-    const tipY = -r * 1.1;
-    const ctrl1X = side * r * 0.7;
-    const ctrl1Y = -r * 0.9;
-    const ctrl2X = side * r * 0.52;
-    const ctrl2Y = -r * 0.45;
-    const rightCurve = quadBezier(baseX, baseY, ctrl1X, ctrl1Y, tipX, tipY, 10);
-    const leftCurve = quadBezier(tipX, tipY, ctrl2X, ctrl2Y, side * r * 0.28, baseY + r * 0.05, 10);
-    const hornShape = [...rightCurve, ...leftCurve];
-    g.beginFill(0x020010, 0.98);
-    g.drawPolygon(polygonPoints(hornShape));
-    g.endFill();
-    g.beginFill(0x1e1b4b, 0.92);
-    g.drawPolygon(polygonPointsAffine(hornShape, 0.55, baseX * 0.55, 0.5, baseY * 0.5));
-    g.endFill();
-    g.beginFill(0x3b0764, 0.78);
-    g.drawPolygon(polygonPointsAffine(hornShape, 0.3, baseX * 0.3, 0.3, baseY * 0.3));
-    g.endFill();
-  });
-
-  // ── 내부 소용돌이 arc 3개 (회전) ──
-  const swirlRot = t * 0.045;
-  for (let si = 0; si < 3; si++) {
-    const srad = r * (0.48 - si * 0.12);
-    g.lineStyle(1.5 - si * 0.3, si === 0 ? 0xa855f7 : si === 1 ? 0x8b5cf6 : 0x7c3aed, 0.55);
-    g.arc(0, 0, srad, swirlRot + si * 1.5, swirlRot + si * 1.5 + Math.PI * 1.3);
+  // 1b) Ring polygon edges (dark)
+  g.lineStyle(1.0, C_SLATE_7, 0.70);
+  for (let ri = 0; ri < ringDefs.length; ri++) {
+    const s = ringStart[ri], e = ringStart[ri + 1];
+    for (let i = s; i < e; i++) {
+      const nxt = (i + 1 < e) ? i + 1 : s;
+      g.moveTo(nodeX[i], nodeY[i]);
+      g.lineTo(nodeX[nxt], nodeY[nxt]);
+    }
   }
   g.lineStyle(0);
 
-  // ── 빨간 쌍안 (공포감) ──
-  const eyeY = -r * 0.28;
-  const eyeX = r * 0.22;
-  const eyePulse = 0.7 + Math.sin(t * 0.18) * 0.3;
-  // 외곽 붉은 글로우
-  g.beginFill(0x7f1d1d, 0.55 * eyePulse);
-  g.drawCircle(-eyeX, eyeY, 10);
-  g.drawCircle(eyeX, eyeY, 10);
-  g.endFill();
-  g.beginFill(0xb91c1c, 0.6 * eyePulse);
-  g.drawCircle(-eyeX, eyeY, 7);
-  g.drawCircle(eyeX, eyeY, 7);
-  g.endFill();
-  // 눈 본체 (블랙)
-  g.beginFill(0x020010, 0.98);
-  g.drawCircle(-eyeX, eyeY, 4.5);
-  g.drawCircle(eyeX, eyeY, 4.5);
-  g.endFill();
-  // 붉은 슬릿 (정교)
-  g.beginFill(0xdc2626, 0.98 * eyePulse);
-  g.drawEllipse(-eyeX, eyeY, 3.2, 1.5);
-  g.drawEllipse(eyeX, eyeY, 3.2, 1.5);
-  g.endFill();
-  g.beginFill(0xfca5a5, 0.95 * eyePulse);
-  g.drawEllipse(-eyeX, eyeY, 1.8, 0.8);
-  g.drawEllipse(eyeX, eyeY, 1.8, 0.8);
-  g.endFill();
-  // 눈 바깥 흐르는 그림자 (눈물 같은)
-  g.lineStyle(1.5, 0x020010, 0.85);
-  g.moveTo(-eyeX, eyeY + 6);
-  g.quadraticCurveTo(-eyeX - 2, eyeY + 12, -eyeX - 5, eyeY + 22);
-  g.moveTo(eyeX, eyeY + 6);
-  g.quadraticCurveTo(eyeX + 2, eyeY + 12, eyeX + 5, eyeY + 22);
+  // 1c) Inter-ring fan edges (A_i → B_bStart..B_bEnd)
+  g.lineStyle(0.8, C_SLATE_7, 0.55);
+  for (let ri = 0; ri < ringDefs.length - 1; ri++) {
+    const aS = ringStart[ri], aE = ringStart[ri + 1];
+    const bS = ringStart[ri + 1], bE = ringStart[ri + 2];
+    const aCount = aE - aS, bCount = bE - bS;
+    for (let i = 0; i < aCount; i++) {
+      const ax = nodeX[aS + i], ay = nodeY[aS + i];
+      const bStart = Math.floor((i / aCount) * bCount);
+      const bEnd = Math.floor(((i + 1) / aCount) * bCount);
+      for (let j = bStart; j <= bEnd; j++) {
+        const jm = j % bCount;
+        g.moveTo(ax, ay); g.lineTo(nodeX[bS + jm], nodeY[bS + jm]);
+      }
+    }
+  }
   g.lineStyle(0);
 
-  // ── 이빨 (하단 좌/우, 날카로운 송곳니) ──
-  const fangOffsetX = r * 0.12;
-  [-1, 1].forEach(side => {
-    const fangTopX = side * fangOffsetX;
-    const fangTopY = r * 0.08;
-    const fangTipX = side * fangOffsetX * 1.3;
-    const fangTipY = r * 0.32;
-    g.beginFill(0xe5e5e5, 0.92);
-    g.drawPolygon([
-      fangTopX - 2, fangTopY,
-      fangTopX + 2, fangTopY,
-      fangTipX, fangTipY,
-    ]);
+  // ══════════════════════════════════════════════════════════════════
+  //  2. Tight accretion coil — 3-tier gradient (outer slate → inner violet).
+  //     각 fiber를 3 tier 폴리라인으로 나눠 그려서 lineStyle 호출 최소화.
+  // ══════════════════════════════════════════════════════════════════
+  const COIL_FIBERS = 22;
+  const tierConfig = [
+    { sStart: 0.00, sEnd: 0.36, colorMain: C_SLATE_7,  colorSub: C_SLATE_7, alphaMain: 0.60, alphaSub: 0.38, thickMain: 0.9, thickSub: 1.2 },
+    { sStart: 0.34, sEnd: 0.71, colorMain: C_SLATE_5,  colorSub: C_SLATE_5, alphaMain: 0.75, alphaSub: 0.50, thickMain: 1.0, thickSub: 1.3 },
+    { sStart: 0.69, sEnd: 1.00, colorMain: C_VIOLET_5, colorSub: C_SLATE_4, alphaMain: 0.95, alphaSub: 0.60, thickMain: 1.1, thickSub: 1.3 },
+  ];
+  for (let f = 0; f < COIL_FIBERS; f++) {
+    const theta0 = (f / COIL_FIBERS) * Math.PI * 2;
+    const seedA = ((f * 37) % 101) / 101;
+    const seedB = ((f * 53) % 89) / 89;
+    const turns = 0.9 + seedA * 0.7;
+    const rStart = r * (0.52 + seedA * 0.08);
+    const rEnd = r * 0.28;
+    const logRatio = rEnd / rStart;
+    const rotSpeed = 0.023 + seedB * 0.010;
+    const isMain = f % 2 === 0;
+    for (const tier of tierConfig) {
+      const col = isMain ? tier.colorMain : tier.colorSub;
+      const alp = isMain ? tier.alphaMain : tier.alphaSub;
+      const thick = isMain ? tier.thickMain : tier.thickSub;
+      g.lineStyle(thick, col, alp);
+      const segs = 14;
+      const span = tier.sEnd - tier.sStart;
+      for (let i = 0; i <= segs; i++) {
+        const s = tier.sStart + span * (i / segs);
+        const rad = rStart * Math.pow(logRatio, s);
+        const ang = theta0 + s * turns * Math.PI * 2 + t * rotSpeed;
+        const x = Math.cos(ang) * rad;
+        const y = Math.sin(ang) * rad;
+        if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+      }
+      g.lineStyle(0);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  3. Event horizon — pure black disk (흰 배경 대비 최대화)
+  // ══════════════════════════════════════════════════════════════════
+  const corePulse = 0.97 + Math.sin(t * 0.035) * 0.03;
+  const eventR = r * 0.26 * corePulse;
+  // 입구 주변 dark grading (코일→블랙홀 전환)
+  g.beginFill(C_SLATE_9, 0.35); g.drawCircle(0, 0, eventR * 1.38); g.endFill();
+  g.beginFill(C_SLATE_9, 0.75); g.drawCircle(0, 0, eventR * 1.16); g.endFill();
+  g.beginFill(C_BLACK,   1.00); g.drawCircle(0, 0, eventR);        g.endFill();
+  // Photon rim — 얇은 violet + white (gravitational lensing 암시)
+  g.lineStyle(2.0, C_VIOLET_5, 0.55);
+  g.drawCircle(0, 0, eventR + 1.5);
+  g.lineStyle(1.3, C_WHITE, 0.90);
+  g.drawCircle(0, 0, eventR);
+  g.lineStyle(0);
+
+  // ══════════════════════════════════════════════════════════════════
+  //  4. Infalling particles (violet core + white head — white bg에 선명)
+  // ══════════════════════════════════════════════════════════════════
+  const INFALL = 10;
+  for (let p = 0; p < INFALL; p++) {
+    const seedA = ((p * 37) % 101) / 101;
+    const seedB = ((p * 53) % 89) / 89;
+    const period = 110 + seedA * 60;
+    const s = ((t + p * 13) % period) / period;
+    if (s > 0.96) continue;
+    const rStart = r * (0.54 + seedA * 0.06);
+    const rEnd = r * 0.28;
+    const logRatio = rEnd / rStart;
+    const rad = rStart * Math.pow(logRatio, s);
+    const turns = 1.2 + seedB * 0.4;
+    const theta0 = (p / INFALL) * Math.PI * 2 + seedB * 2.5;
+    const ang = theta0 + s * turns * Math.PI * 2 + t * 0.025;
+    const x = Math.cos(ang) * rad;
+    const y = Math.sin(ang) * rad;
+    const intensity = 0.45 + Math.pow(s, 1.5) * 0.55;
+    const size = 1.1 + s * 1.6;
+    for (let tr = 3; tr >= 1; tr--) {
+      const trS = Math.max(0, s - tr * 0.015);
+      const trR = rStart * Math.pow(logRatio, trS);
+      const trA = theta0 + trS * turns * Math.PI * 2 + t * 0.025;
+      const tx = Math.cos(trA) * trR;
+      const ty = Math.sin(trA) * trR;
+      const fade = (4 - tr) / 4;
+      g.beginFill(C_VIOLET_5, 0.55 * fade * intensity);
+      g.drawCircle(tx, ty, size * fade * 0.85);
+      g.endFill();
+    }
+    g.beginFill(C_VIOLET_5, 0.40 * intensity); g.drawCircle(x, y, size * 2.4); g.endFill();
+    g.beginFill(C_WHITE,    0.95 * intensity); g.drawCircle(x, y, size);        g.endFill();
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  5. Mesh 노드 dot — dark core + pale halo (흰 배경에서 검은 점처럼 pop)
+  // ══════════════════════════════════════════════════════════════════
+  const eventR2 = eventR * eventR * 1.2;
+  for (let i = 0; i < nodeX.length; i++) {
+    const nx = nodeX[i], ny = nodeY[i];
+    if (nx * nx + ny * ny < eventR2) continue;
+    g.beginFill(C_SLATE_5, 0.30);
+    g.drawCircle(nx, ny, 3.3);
     g.endFill();
-    g.beginFill(0xf5f5f5, 0.95);
-    g.drawPolygon([
-      fangTopX - 0.6, fangTopY + 1,
-      fangTopX + 0.6, fangTopY + 1,
-      fangTipX, fangTipY - 1,
-    ]);
+    g.beginFill(C_SLATE_9, 1.0);
+    g.drawCircle(nx, ny, 1.7);
     g.endFill();
-  });
+  }
 }

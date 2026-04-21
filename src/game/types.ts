@@ -172,27 +172,38 @@ export interface EnemyProjectileState {
   active: boolean;
   /** 보스 공격 variant (랜더·물리 분기). 기본 undefined=일반 투사체. */
   variant?:
-    | 'water_wave'       // 큰 물방울
-    | 'water_ring'       // 파동 링 조각
-    | 'water_puddle'     // 지연 후 폭발 (바닥 마커)
-    | 'water_wavefront'  // 사인파 진행 (sine oscillation)
-    | 'fire_ball'        // 화염구
-    | 'fire_spiral'      // 회전 spiral
-    | 'fire_meteor'      // 하늘 낙하 (예고 후)
-    | 'earth_rock'       // 큰 돌덩이 (느림, 큰 피해)
-    | 'earth_shard'      // 작은 파편
-    | 'earth_rupture'    // 지연 균열 폭발
-    | 'electric_bolt'    // 직선 번개 (빠름)
-    | 'electric_arc'     // 방사 스파크
-    | 'electric_orb'     // 추적 구체
-    | 'light_ray'        // 레이저 빔
-    | 'light_holy'       // 방사 광선
-    | 'light_judgment'   // 지연 수직 광선
+    | 'water_resonance_pulse' // A: 미니 Phase Resonator atom 투사체
+    | 'water_harmonic_beam'   // B: sine-undulating beam + splash
+    | 'water_tidal_preview'   // C 예고: hex reticle + 수축 링
+    | 'water_tidal_mesh'      // C 폭발: expanding fan-triangulation mesh
+    | 'fire_plasma_pulse'      // A: Plasma Whip — 곡선 호 | C: Solar Pursuit — homing
+    | 'fire_solar_flare'       // B: Twin Comet Cross — 2발 곡선 교차
+    | 'earth_orbital_meteor'   // A: 궤도 선회 → 탈출 | C: 3-spread Crystal Barrage
+    | 'earth_tectonic_wall'    // B: 좌우 crystal wall 접근 (수렴 압착)
+    | 'electric_chain_strike'  // A: 경로 따라 연쇄 strike node
+    | 'electric_arc_rail'      // B: 보스→타겟너머 정지 전기 선 (긴 hit zone)
+    | 'electric_dual_terminal' // C: 플레이어 양옆 pole 2개 + arcing 선
+    | 'light_prism_main'    // A main: 보스→midpoint 직선 beam
+    | 'light_prism_branch'  // A branch: midpoint에서 갈라지는 refraction
+    | 'light_halo'          // B: 보스 주위 expanding photon ring
+    | 'light_pillar'        // C: 플레이어 위치 수직 Sun Pillar
     | 'dark_tendril'     // 촉수 (휘는 궤적)
     | 'dark_void'        // 검은 구체
     | 'dark_portal';     // 포털 스폰 마커
   /** 지연 투사체: 타이머 끝나면 실제 activate (착탄 대미지) — delay 동안은 예고/마커만 렌더 */
   delay?: number;
+  /** delay 동안 N 프레임 비행 후 정지 (traveling preview — 보스→타겟 이동) */
+  travelFramesLeft?: number;
+  /** N 프레임 뒤 spinSpeed=0으로 강제 (orbit-then-escape 패턴 — earth A) */
+  orbitalReleaseAt?: number;
+  /** 선/호/체인의 시작점 (electric arc rail, dual terminal 등) */
+  originX?: number;
+  originY?: number;
+  /** 선/체인의 끝점 또는 2차 pole 위치 (electric arc rail, dual terminal) */
+  targetX?: number;
+  targetY?: number;
+  /** orbit 반경 — 설정 시 pr.x/y는 origin 주위 circle에 잠금 */
+  orbitRadius?: number;
   /** 추적 투사체용: 가속 */
   homing?: boolean;
   /** 초기 생성 시 각도 (tendril 회전용) */

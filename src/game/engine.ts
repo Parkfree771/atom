@@ -74,6 +74,7 @@ export class GameEngine {
   private particleRenderer!: ParticleRenderState;
   private effectGfx: PIXI.Graphics[] = [];
   private enemyProjectileGfx!: PIXI.Graphics;
+  private enemyProjectileGlowGfx!: PIXI.Graphics;
   private playerBarsGfx!: PIXI.Graphics;
   private entityLayer!: PIXI.Container;
   private effectLayer!: PIXI.Container;
@@ -260,9 +261,12 @@ export class GameEngine {
     // 심연 — 중력 렌즈를 worldContainer 전체에 적용 (BigBang 패턴, 적/이펙트까지 시각 왜곡)
     this.abyssSkill = new AbyssSkill(overlayLayer, worldContainer);
 
-    // 적 투사체 그래픽 (단일 Graphics로 모든 투사체 통합 렌더)
+    // 적 투사체 그래픽 — glow(ADD blend) + 본체 2-layer
+    this.enemyProjectileGlowGfx = new PIXI.Graphics();
+    this.enemyProjectileGlowGfx.blendMode = PIXI.BLEND_MODES.ADD;
+    effectLayer.addChild(this.enemyProjectileGlowGfx); // 아래 (bloom)
     this.enemyProjectileGfx = new PIXI.Graphics();
-    effectLayer.addChild(this.enemyProjectileGfx);
+    effectLayer.addChild(this.enemyProjectileGfx);     // 위 (본체)
 
     // Player HP/XP 바 — 플레이어 레이어(최상위)에 추가
     this.playerBarsGfx = new PIXI.Graphics();
@@ -394,6 +398,17 @@ export class GameEngine {
     const onKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
       this.keys.add(key);
+
+      // DEV: shift + 1~6 특정 보스 직접 소환 (dev 모드에서만)
+      if (this.devMode && e.shiftKey && e.code.startsWith('Digit')) {
+        const digit = e.code.slice(5);
+        const bossMap: Record<string, EnemyType> = {
+          '1': 'boss_water',  '2': 'boss_fire',   '3': 'boss_earth',
+          '4': 'boss_electric', '5': 'boss_light', '6': 'boss_dark',
+        };
+        const bt = bossMap[digit];
+        if (bt) { this.devSpawnSpecificBoss(bt); return; }
+      }
 
       // 액티브 스킬 발동 (1~6)
       if (key === '1') this.tryFireSkill('water_tidal');
@@ -676,92 +691,105 @@ export class GameEngine {
     pr.active = true;
     pr.variant = variant;
     pr.delay = undefined;
+    pr.travelFramesLeft = undefined;
+    pr.orbitalReleaseAt = undefined;
+    pr.originX = undefined;
+    pr.originY = undefined;
+    pr.targetX = undefined;
+    pr.targetY = undefined;
+    pr.orbitRadius = undefined;
     pr.homing = undefined;
     pr.spinAngle = undefined;
     pr.spinSpeed = undefined;
+    // pool 재사용 시 stale wave/expire 방지
+    pr.waveBaseVx = undefined;
+    pr.waveBaseVy = undefined;
+    pr.wavePerpX = undefined;
+    pr.wavePerpY = undefined;
+    pr.waveAmp = undefined;
+    pr.wavePhase = undefined;
+    pr.wavePhaseSpeed = undefined;
+    pr.onExpireSpawnCount = undefined;
+    pr.onExpireSpawnSpeed = undefined;
+    pr.onExpireSpawnLife = undefined;
+    pr.onExpireSpawnRadius = undefined;
+    pr.onExpireSpawnDamage = undefined;
+    pr.onExpireSpawnColor = undefined;
+    pr.onExpireSpawnVariant = undefined;
   }
 
-  // ── 물 보스 공격 ──
   // ── Phase Resonator (물 보스) ──
-  // A. Dual Ring Burst  : 2겹 파동 링 (내 CW 빠름, 외 CCW 느림) — 간섭 패턴
-  // B. Sinusoidal Wavefront : 5 pulses 사인파 진행 — 수직 오실레이션
-  // C. Resonance Lock : 예고 pulse node → 폭발 + 12방 radial sub-pulses
+  // A. Resonance Pulse     : 미니 atom 1개 (core + 궤도 + 전자 + hex frame + log-spiral trail)
+  // B. Harmonic Wave Array : 5~7 sine-undulating beam + splash + 위상 간섭
+  // C. Tidal Mesh Field    : 예고 → expanding ring-to-ring fan triangulation mesh AOE
   private bossAttackWater(e: EnemyState, player: PlayerState, diff: number) {
     const roll = Math.random();
     const dx = player.x - e.x;
     const dy = player.y - e.y;
     const base = Math.atan2(dy, dx);
 
-    if (roll < 0.50) {
-      // A. Dual Ring Burst — 2겹 동심 링. 내·외 각도 엇갈림 + 속도 차이.
-      const countInner = 8 + Math.floor(diff);
-      const countOuter = 10 + Math.floor(diff * 1.5);
-      const rotA = Math.random() * Math.PI * 2;
-      const rotB = rotA + Math.PI / countOuter; // 외측은 내측 사이 각으로 어긋남
-      // 내측 (빠름, 작음)
-      for (let k = 0; k < countInner; k++) {
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const a = rotA + (k / countInner) * Math.PI * 2;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(a) * 4.0, Math.sin(a) * 4.0,
-          8, 9 * diff, 140, 0x38bdf8, 'water_ring');
-      }
-      // 외측 (느림, 큼) — 간섭 무늬 생성
-      for (let k = 0; k < countOuter; k++) {
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const a = rotB + (k / countOuter) * Math.PI * 2;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(a) * 2.6, Math.sin(a) * 2.6,
-          10, 10 * diff, 170, 0x0ea5e9, 'water_ring');
-      }
+    if (roll < 0.40) {
+      // A. Resonance Pulse — 1개의 미니 Phase Resonator atom.
+      //    공 아님 — 궤도·전자·hex frame까지 전부 보스 silhouette 축소판.
+      const pr = this.acquireEnemyProjectile(); if (!pr) return;
+      const spd = 2.4;
+      this.initProjectile(pr, e.x, e.y,
+        Math.cos(base) * spd, Math.sin(base) * spd,
+        18, 22 * diff, 210, 0x0ea5e9, 'water_resonance_pulse');
+      pr.spinAngle = base; // 진행 방향 저장 (trail 역산용)
 
-    } else if (roll < 0.80) {
-      // B. Sinusoidal Wavefront — 5 pulses가 일렬로 출발, 각자 엇갈린 위상으로 수직 오실레이션
-      const n = 5 + Math.floor(diff * 0.5);
-      const speed = 3.8;
+    } else if (roll < 0.75) {
+      // B. Phase Helix — 3 미니 Phase Resonator atom이 baseline 주위로 브레이딩.
+      //    각자 120° 위상 엇갈림 → 서로 교차하며 helix 형성. 직선 X.
+      const n = 3;
+      const speed = 3.4;
       const baseVx = Math.cos(base) * speed;
       const baseVy = Math.sin(base) * speed;
-      const perpX = -Math.sin(base); // 단위 수직
+      const perpX = -Math.sin(base);
       const perpY =  Math.cos(base);
-      // 출발 오프셋 — 5발이 횡으로 살짝 벌어져 시작
       for (let k = 0; k < n; k++) {
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const offIdx = k - (n - 1) / 2; // -2..+2
-        const startOff = offIdx * 16;
-        const sx = e.x + perpX * startOff;
-        const sy = e.y + perpY * startOff;
-        this.initProjectile(pr, sx, sy, baseVx, baseVy,
-          9, 11 * diff, 140, 0x0284c7, 'water_wavefront');
+        this.initProjectile(pr, e.x, e.y, baseVx, baseVy,
+          12, 14 * diff, 170, 0x3b82f6, 'water_harmonic_beam');
         pr.waveBaseVx = baseVx;
         pr.waveBaseVy = baseVy;
         pr.wavePerpX = perpX;
         pr.wavePerpY = perpY;
-        pr.waveAmp = 38;                                  // 피크 변위 px
-        pr.wavePhase = offIdx * 0.9;                      // 위상 엇갈림
-        pr.wavePhaseSpeed = 0.14;                         // 주기 ~ 45f
+        pr.waveAmp = 78;                          // 큰 진폭 — 가시성 + 교차
+        pr.wavePhase = (k / n) * Math.PI * 2;     // 120° 엇갈림 (braiding)
+        pr.wavePhaseSpeed = 0.16;
+        pr.spinAngle = base;                      // 진행 방향 (trail 역산)
       }
 
     } else {
-      // C. Resonance Lock — 예고 pulse node → 폭발 + 12방 radial sub-pulses
+      // C. Tidal Mesh Field — 보스에서 target으로 비행 → 도착 후 preview → mesh AOE.
+      //    delay=115 (비행 35 + preview 60 + flash 20).
+      const TRAVEL = 35;
+      const TOTAL_DELAY = 95; // 비행+정지 preview 합친 delay
+      const tx = player.x, ty = player.y;
+      const ddx = tx - e.x, ddy = ty - e.y;
+      const vxCast = ddx / TRAVEL;
+      const vyCast = ddy / TRAVEL;
       const pr = this.acquireEnemyProjectile(); if (!pr) return;
-      this.initProjectile(pr, player.x, player.y, 0, 0,
-        46, 22 * diff, 115, 0x1d4ed8, 'water_puddle');
-      pr.delay = 90;                                  // 1.5s 예고
-      // 폭발 후 radial 서브 방출
-      pr.onExpireSpawnCount = 12 + Math.floor(diff);
-      pr.onExpireSpawnSpeed = 3.4;
-      pr.onExpireSpawnLife = 95;
-      pr.onExpireSpawnRadius = 7;
-      pr.onExpireSpawnDamage = 9 * diff;
-      pr.onExpireSpawnColor = 0x38bdf8;
-      pr.onExpireSpawnVariant = 'water_ring';
+      this.initProjectile(pr, e.x, e.y,
+        vxCast, vyCast,
+        62, 22 * diff, 115, 0x2563eb, 'water_tidal_preview');
+      pr.delay = TOTAL_DELAY;
+      pr.travelFramesLeft = TRAVEL; // 35 프레임 동안 비행 → 정지
+      pr.onExpireSpawnCount = 1;
+      pr.onExpireSpawnSpeed = 0;
+      pr.onExpireSpawnLife = 70;
+      pr.onExpireSpawnRadius = 110;
+      pr.onExpireSpawnDamage = 20 * diff;
+      pr.onExpireSpawnColor = 0x0ea5e9;
+      pr.onExpireSpawnVariant = 'water_tidal_mesh';
     }
   }
 
   // ── Plasma Fusor (불 보스) ──
-  // A. Plasma Lance : 3 플라즈마 창 (빠르고 긴 streak)
-  // B. Corona Whirl : 10-14 소용돌이 불꽃 파편 (나선 궤적)
-  // C. Meteor Rain  : 4-6 화염 기둥 예고 + 낙하
+  // A. Plasma Whip         : 1개 미니 Plasma Star, spinSpeed로 큰 곡선 호 (옆에서 휘어 들어감)
+  // B. Twin Comet Cross    : 2개가 양쪽에서 곡선 진입해 플레이어 지점에서 교차
+  // C. Supernova           : 보스→target 비행 → 수축 링 (밖→안) → radial flame ray burst
   private bossAttackFire(e: EnemyState, player: PlayerState, diff: number) {
     const roll = Math.random();
     const dx = player.x - e.x;
@@ -769,48 +797,49 @@ export class GameEngine {
     const base = Math.atan2(dy, dx);
 
     if (roll < 0.40) {
-      // A. Plasma Lance — 3발 플라즈마 창 부채꼴, 빠르고 강력
-      const n = 3 + Math.floor(diff * 0.5);
-      for (let k = -Math.floor(n / 2); k <= Math.floor(n / 2); k++) {
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = base + k * 0.15;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 6.8, Math.sin(ang) * 6.8,
-          10, 13 * diff, 130, 0xf97316, 'fire_ball');
-      }
+      // A. Plasma Whip — 1개 미니 Plasma Star가 옆에서 크게 휘어 들어옴.
+      //    초기각 = base ± 0.75rad(~43°) 벗어남 → spinSpeed로 곡률 → 플레이어 쪽 휘어감.
+      const pr = this.acquireEnemyProjectile(); if (!pr) return;
+      const sideSign = Math.random() < 0.5 ? 1 : -1;
+      const initAng = base + 0.75 * sideSign;
+      const spd = 4.0;
+      this.initProjectile(pr, e.x, e.y,
+        Math.cos(initAng) * spd, Math.sin(initAng) * spd,
+        18, 24 * diff, 150, 0xf97316, 'fire_plasma_pulse');
+      pr.spinAngle = initAng;
+      pr.spinSpeed = -sideSign * 0.014;  // 플레이어 쪽으로 휘어감
 
     } else if (roll < 0.75) {
-      // B. Corona Whirl — 10-14 불꽃 파편 나선 방사 (시계/반시계 교대)
-      const count = 10 + Math.floor(diff * 2);
-      const rot = Math.random() * Math.PI * 2;
-      for (let k = 0; k < count; k++) {
+      // B. Twin Comet Cross — 2발이 양쪽에서 곡선 진입 → 플레이어 지점에서 교차.
+      //    spinSpeed 반대 방향 → 서로 converge.
+      for (let k = 0; k < 2; k++) {
+        const sideSign = (k === 0) ? 1 : -1;
+        const initAng = base + 0.55 * sideSign;
+        const spd = 3.6;
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = rot + (k / count) * Math.PI * 2;
         this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 3.6, Math.sin(ang) * 3.6,
-          9, 9 * diff, 130, 0xdc2626, 'fire_spiral');
-        pr.spinAngle = ang;
-        pr.spinSpeed = (k % 2 === 0 ? 1 : -1) * 0.028; // 교대 나선
+          Math.cos(initAng) * spd, Math.sin(initAng) * spd,
+          13, 16 * diff, 155, 0xea580c, 'fire_solar_flare');
+        pr.spinAngle = initAng;
+        pr.spinSpeed = -sideSign * 0.011;
       }
 
     } else {
-      // C. Meteor Rain — 4-6 화염 기둥 (플레이어 주변 예측 위치)
-      const count = 4 + Math.floor(diff);
-      for (let k = 0; k < count; k++) {
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const tx = player.x + (Math.random() - 0.5) * 220;
-        const ty = player.y + (Math.random() - 0.5) * 220;
-        this.initProjectile(pr, tx, ty, 0, 0,
-          40, 20 * diff, 100, 0xea580c, 'fire_meteor');
-        pr.delay = 50 + Math.floor(k * 9); // 0.83s 시간차 stagger
-      }
+      // C. Solar Pursuit — 1 큰 homing 플라즈마 orb, 느리게 플레이어 추적.
+      //    구조적 차별: A는 곡선 whip, B는 곡선 교차, C는 추적 (spin 없음).
+      const pr = this.acquireEnemyProjectile(); if (!pr) return;
+      const spd = 2.2;   // 느리지만 끈질기게 쫓아옴
+      this.initProjectile(pr, e.x, e.y,
+        Math.cos(base) * spd, Math.sin(base) * spd,
+        22, 26 * diff, 220, 0xdc2626, 'fire_plasma_pulse');
+      pr.homing = true;
     }
   }
 
-  // ── Crystal Lattice (흙 보스) ──
-  // A. Crystal Spear : 2-3 육각 프리즘 부채꼴 (크고 느리고 강함)
-  // B. Shard Rain    : 12-16 결정 파편 방사 (삼각 splinter)
-  // C. Tectonic Rift : 지연 균열 + 터질 때 8방 결정 파편 방사
+  // ── Planet Earth (흙 보스) ──
+  // A. Orbital Meteor    : 보스 주위 반회전 선회 → 탈출해서 플레이어 쪽 직진
+  // B. Tectonic Cleave   : 플레이어 좌우에서 crystal wall 2개 접근 (수렴 압착)
+  // C. Seismic Quake     : 플레이어 위치 → branching crack network → crystal pillar burst
   private bossAttackEarth(e: EnemyState, player: PlayerState, diff: number) {
     const roll = Math.random();
     const dx = player.x - e.x;
@@ -818,135 +847,207 @@ export class GameEngine {
     const base = Math.atan2(dy, dx);
 
     if (roll < 0.40) {
-      // A. Crystal Spear — 육각 프리즘 2-3발 부채꼴
-      const count = 2 + Math.floor(diff / 2);
-      for (let k = 0; k < count; k++) {
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = base + (k - (count - 1) / 2) * 0.18;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 3.0, Math.sin(ang) * 3.0,
-          18, 18 * diff, 170, 0xa16207, 'earth_rock');
-      }
+      // A. Orbital Meteor — 보스 주위 접선 방향 시작 → 궤도 도는 동안 플레이어 쪽으로 선회 →
+      //    orbitalReleaseAt 만료 시 탈출해서 직진.
+      const pr = this.acquireEnemyProjectile(); if (!pr) return;
+      const sideSign = Math.random() < 0.5 ? 1 : -1;
+      const tangentAng = base + (Math.PI / 2) * sideSign; // 보스 기준 접선 방향
+      const spd = 3.4;
+      this.initProjectile(pr, e.x, e.y,
+        Math.cos(tangentAng) * spd, Math.sin(tangentAng) * spd,
+        17, 22 * diff, 175, 0xb45309, 'earth_orbital_meteor');
+      pr.spinAngle = tangentAng;
+      pr.spinSpeed = -sideSign * 0.048;   // 타이트 궤도 (반경 ≈ 71px)
+      pr.orbitalReleaseAt = 42;           // 42 프레임 후 spinSpeed=0 (궤도 탈출)
 
     } else if (roll < 0.75) {
-      // B. Shard Rain — 12-16 삼각 splinter 방사
-      const count = 12 + Math.floor(diff * 2);
-      const rot = Math.random() * Math.PI * 2;
-      for (let k = 0; k < count; k++) {
+      // B. Tectonic Cleave — 플레이어 좌우 220px 떨어진 곳에서 벽 2개 spawn → 서로 접근.
+      //    수렴 압착.
+      const WALL_OFFSET = 220;
+      const perpX = -Math.sin(base);
+      const perpY =  Math.cos(base);
+      for (let k = 0; k < 2; k++) {
+        const sideSign = (k === 0) ? 1 : -1;
+        const wx = player.x + perpX * WALL_OFFSET * sideSign;
+        const wy = player.y + perpY * WALL_OFFSET * sideSign;
+        // 이동 방향: 플레이어 쪽 (perpendicular 반대)
+        const moveX = -perpX * sideSign;
+        const moveY = -perpY * sideSign;
+        const spd = 2.3;
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = rot + (k / count) * Math.PI * 2;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 3.4, Math.sin(ang) * 3.4,
-          7, 8 * diff, 120, 0xd97706, 'earth_shard');
+        this.initProjectile(pr, wx, wy,
+          moveX * spd, moveY * spd,
+          18, 22 * diff, 115, 0xd97706, 'earth_tectonic_wall');
+        pr.spinAngle = Math.atan2(moveY, moveX); // 벽 이동 방향 기억 (렌더 방향용)
       }
 
     } else {
-      // C. Tectonic Rift — 지연 균열 + 터지면 8방 파편 방사
-      const pr = this.acquireEnemyProjectile(); if (!pr) return;
-      this.initProjectile(pr, player.x, player.y, 0, 0,
-        60, 26 * diff, 110, 0xb45309, 'earth_rupture');
-      pr.delay = 70;
-      pr.onExpireSpawnCount = 8 + Math.floor(diff);
-      pr.onExpireSpawnSpeed = 3.2;
-      pr.onExpireSpawnLife = 100;
-      pr.onExpireSpawnRadius = 6;
-      pr.onExpireSpawnDamage = 8 * diff;
-      pr.onExpireSpawnColor = 0xd97706;
-      pr.onExpireSpawnVariant = 'earth_shard';
+      // C. Crystal Barrage — 3 mini Planet이 V 형태로 전방 확산 (궤도 X, 직진).
+      //    구조적 차별: A는 1 tangent 궤도, B는 2 wall 수렴, C는 3 V spread.
+      const spd = 3.0;
+      for (let k = -1; k <= 1; k++) {
+        const ang = base + k * 0.15;
+        const pr = this.acquireEnemyProjectile(); if (!pr) break;
+        this.initProjectile(pr, e.x, e.y,
+          Math.cos(ang) * spd, Math.sin(ang) * spd,
+          13, 16 * diff, 165, 0xb45309, 'earth_orbital_meteor');
+      }
     }
   }
 
   // ── Tesla Nucleus (전기 보스) ──
-  // A. Chain Lightning : 3-4 직선 번개 나란히 발사 (빠름)
-  // B. Arc Burst        : 12-14 전기 아크 방사 (빠른 360°)
-  // C. Seeker Bolt      : 추적 번개 1개 (homing, 번개 실루엣)
+  // A. Chain Strike Cascade : 보스에서 **랜덤 방향**으로 5 node 연쇄 (조준 X, 피할 수 있음)
+  // B. Arc Rail             : 보스에서 **랜덤 카디널 방향** 정지 선 (조준 X)
+  // C. Dual Terminal        : player 양옆 pole + arcing (close-combat punish, 긴 preview)
   private bossAttackElectric(e: EnemyState, player: PlayerState, diff: number) {
     const roll = Math.random();
     const dx = player.x - e.x;
     const dy = player.y - e.y;
-    const base = Math.atan2(dy, dx);
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const dirX = dx / dist, dirY = dy / dist;
 
-    if (roll < 0.45) {
-      // A. Chain Lightning — 3-4 직선 번개 나란히
-      const n = 3 + Math.floor(diff * 0.5);
-      for (let k = 0; k < n; k++) {
+    if (roll < 0.40) {
+      // A. Chain Strike Cascade — 보스→player 경로 5 node. 시작점/끝점 모두 plate로 먼저 표시,
+      //    delay 끝나면 prev→current 사이로 전기 흘려서 hit. 피하려면 경로 밖으로 이동.
+      const CHAIN_N = 5;
+      let prevX = e.x, prevY = e.y;
+      for (let k = 0; k < CHAIN_N; k++) {
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const perpX = -Math.sin(base);
-        const perpY =  Math.cos(base);
-        const off = (k - (n - 1) / 2) * 30;
-        this.initProjectile(pr,
-          e.x + perpX * off, e.y + perpY * off,
-          Math.cos(base) * 7.5, Math.sin(base) * 7.5,
-          7, 11 * diff, 110, 0x7c3aed, 'electric_bolt');
+        const frac = (k + 1) / CHAIN_N;
+        const nx = e.x + dx * frac;
+        const ny = e.y + dy * frac;
+        const delayK = 30 + k * 12;             // 30, 42, 54, 66, 78 (peak 1.3s)
+        this.initProjectile(pr, nx, ny, 0, 0,
+          16, 16 * diff, delayK + 24, 0x6d28d9, 'electric_chain_strike');
+        pr.delay = delayK;
+        pr.originX = prevX;
+        pr.originY = prevY;
+        prevX = nx; prevY = ny;
       }
 
-    } else if (roll < 0.80) {
-      // B. Arc Burst — 12-14 방사 arc (빠르고 전방향)
-      const count = 12 + Math.floor(diff * 2);
-      const rot = Math.random() * Math.PI * 2;
-      for (let k = 0; k < count; k++) {
+    } else if (roll < 0.75) {
+      // B. Arc Rail — 보스→player 너머 경로. 시작점(보스) + 끝점(player 너머) plate로 먼저 표시.
+      //    delay 끝나면 두 점 사이로 전기 흘려서 라인 전체 hit. 피하려면 라인 밖으로 이동.
+      const RAIL_LEN = dist + 220;
+      const endX = e.x + dirX * RAIL_LEN;
+      const endY = e.y + dirY * RAIL_LEN;
+      const fracs = [0.30, 0.55, 0.85];
+      for (let k = 0; k < fracs.length; k++) {
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = rot + (k / count) * Math.PI * 2;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 4.8, Math.sin(ang) * 4.8,
-          7, 9 * diff, 115, 0xa855f7, 'electric_arc');
+        const px = e.x + dirX * RAIL_LEN * fracs[k];
+        const py = e.y + dirY * RAIL_LEN * fracs[k];
+        this.initProjectile(pr, px, py, 0, 0,
+          16, 20 * diff, 84, 0x6d28d9, 'electric_arc_rail');
+        pr.delay = 60;
+        pr.originX = e.x;
+        pr.originY = e.y;
+        pr.targetX = endX;
+        pr.targetY = endY;
       }
 
     } else {
-      // C. Seeker Bolt — 추적 번개 1개 (번개 실루엣, 공 아님)
-      const pr = this.acquireEnemyProjectile(); if (!pr) return;
-      this.initProjectile(pr, e.x, e.y,
-        Math.cos(base) * 2.2, Math.sin(base) * 2.2,
-        14, 18 * diff, 240, 0x7c3aed, 'electric_orb');
-      pr.homing = true;
+      // C. Dual Terminal — player 조준 (근접 전투 punish). preview 75f (1.25s).
+      const perpX = -dirY, perpY = dirX;
+      const POLE_OFFSET = 130;
+      const poleAx = player.x + perpX * POLE_OFFSET;
+      const poleAy = player.y + perpY * POLE_OFFSET;
+      const poleBx = player.x - perpX * POLE_OFFSET;
+      const poleBy = player.y - perpY * POLE_OFFSET;
+      // Pole A (arcing 선 담당)
+      const prA = this.acquireEnemyProjectile(); if (!prA) return;
+      this.initProjectile(prA, poleAx, poleAy, 0, 0,
+        18, 16 * diff, 99, 0x6d28d9, 'electric_dual_terminal');
+      prA.delay = 75;
+      prA.targetX = poleBx;
+      prA.targetY = poleBy;
+      // Pole B (hit zone만)
+      const prB = this.acquireEnemyProjectile(); if (!prB) return;
+      this.initProjectile(prB, poleBx, poleBy, 0, 0,
+        18, 16 * diff, 99, 0x6d28d9, 'electric_dual_terminal');
+      prB.delay = 75;
+      // 가운데 hit zone (player 조준 위치)
+      const prMid = this.acquireEnemyProjectile(); if (!prMid) return;
+      this.initProjectile(prMid, player.x, player.y, 0, 0,
+        20, 22 * diff, 99, 0x6d28d9, 'electric_dual_terminal');
+      prMid.delay = 75;
+      prMid.originX = undefined;
+      prMid.targetX = undefined;
     }
   }
 
-  // ── 빛 보스 공격 ──
+  // ── Photon Core (빛 보스) ──
+  // A. Prism Refraction : 보스→midpoint main beam + midpoint에서 3갈래 split
+  // B. Halo Ring        : 보스 주위 8 photon node가 ring 형태로 expanding
+  // C. Sun Pillar       : 플레이어 위치에 위에서 수직 빛 기둥 낙하
   private bossAttackLight(e: EnemyState, player: PlayerState, diff: number) {
     const roll = Math.random();
     const dx = player.x - e.x;
     const dy = player.y - e.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const dirX = dx / dist, dirY = dy / dist;
     const base = Math.atan2(dy, dx);
-    if (roll < 0.45) {
-      // 1. 좌우로 휘두르는 레이저 (5발 수직 수렴)
-      const n = 5 + Math.floor(diff);
-      for (let k = 0; k < n; k++) {
+
+    if (roll < 0.40) {
+      // A. Prism Refraction — main beam + 3 branches at midpoint.
+      //    4 projectiles: main (boss→midpoint), 3 branches (midpoint→endpoint).
+      const midDist = dist * 0.60;               // midpoint = 보스→player 60% 지점
+      const midX = e.x + dirX * midDist;
+      const midY = e.y + dirY * midDist;
+      const SPREAD = Math.PI / 9;                // 20° spread
+      const BRANCH_LEN = dist * 0.75;            // branch 길이 — player 너머까지
+      // Main beam
+      const prM = this.acquireEnemyProjectile(); if (!prM) return;
+      this.initProjectile(prM, midX, midY, 0, 0,
+        16, 16 * diff, 84, 0xd97706, 'light_prism_main');
+      prM.delay = 60;
+      prM.originX = e.x;
+      prM.originY = e.y;
+      // 3 branches (각도 -SPREAD, 0, +SPREAD)
+      for (let k = -1; k <= 1; k++) {
+        const branchAng = base + k * SPREAD;
+        const endX = midX + Math.cos(branchAng) * BRANCH_LEN;
+        const endY = midY + Math.sin(branchAng) * BRANCH_LEN;
+        const prB = this.acquireEnemyProjectile(); if (!prB) break;
+        // branch hit point 는 중간
+        const hitX = midX + Math.cos(branchAng) * BRANCH_LEN * 0.55;
+        const hitY = midY + Math.sin(branchAng) * BRANCH_LEN * 0.55;
+        this.initProjectile(prB, hitX, hitY, 0, 0,
+          16, 18 * diff, 84, 0xd97706, 'light_prism_branch');
+        prB.delay = 60;                          // main과 동시 strike
+        prB.originX = midX;                      // branch 시작점
+        prB.originY = midY;
+        prB.targetX = endX;                      // branch 끝점 (렌더에서 전체 선 그림)
+        prB.targetY = endY;
+      }
+
+    } else if (roll < 0.75) {
+      // B. Halo Ring — 보스 주위 8 photon node, 확장 링 방사.
+      //    telegraph (ring outline 형성) → strike (확장 이동 + hit).
+      const NODES = 8;
+      const START_R = 80;                         // 시작 반경
+      const rotJit = Math.random() * Math.PI * 2;
+      for (let k = 0; k < NODES; k++) {
+        const ang = rotJit + (k / NODES) * Math.PI * 2;
+        const sx = e.x + Math.cos(ang) * START_R;
+        const sy = e.y + Math.sin(ang) * START_R;
+        const vspd = 2.8;
         const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const off = (k - (n - 1) / 2) * 0.06;
-        const ang = base + off;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 6.8, Math.sin(ang) * 6.8,
-          6, 12 * diff, 140, 0xfde047, 'light_ray');
+        this.initProjectile(pr, sx, sy,
+          Math.cos(ang) * vspd, Math.sin(ang) * vspd,
+          14, 14 * diff, 110, 0xd97706, 'light_halo');
+        pr.delay = 50;                            // 50f telegraph — node 형성 (이동 X)
+        pr.originX = e.x;                         // 보스 중심 (링 center)
+        pr.originY = e.y;
+        pr.spinAngle = ang;                       // 반경 방향 저장
+        pr.travelFramesLeft = undefined;          // (delay 끝나면 표준 vx/vy 이동)
       }
-    } else if (roll < 0.80) {
-      // 2. 8방향 방사 holy ray (2-tier rotation)
-      const countA = 8;
-      const rotA = Math.random() * Math.PI * 2;
-      for (let k = 0; k < countA; k++) {
-        const pr = this.acquireEnemyProjectile(); if (!pr) break;
-        const ang = rotA + (k / countA) * Math.PI * 2;
-        this.initProjectile(pr, e.x, e.y,
-          Math.cos(ang) * 4.2, Math.sin(ang) * 4.2,
-          10, 11 * diff, 140, 0xf59e0b, 'light_holy');
-      }
-      if (diff >= 1.4) {
-        // 2번째 ring 반대 방향 (높은 난이도에서만)
-        const rotB = rotA + Math.PI / 8;
-        for (let k = 0; k < countA; k++) {
-          const pr = this.acquireEnemyProjectile(); if (!pr) break;
-          const ang = rotB + (k / countA) * Math.PI * 2;
-          this.initProjectile(pr, e.x, e.y,
-            Math.cos(ang) * 3.2, Math.sin(ang) * 3.2,
-            8, 9 * diff, 140, 0xfbbf24, 'light_holy');
-        }
-      }
+
     } else {
-      // 3. 심판강림 — 플레이어 현재 위치 수직 광선 (지연)
+      // C. Sun Pillar — 플레이어 위치에 수직 빛 기둥. 위에서 내려옴 telegraph.
       const pr = this.acquireEnemyProjectile(); if (!pr) return;
       this.initProjectile(pr, player.x, player.y, 0, 0,
-        28, 26 * diff, 90, 0xfef9c3, 'light_judgment');
-      pr.delay = 45;
+        26, 26 * diff, 84, 0xd97706, 'light_pillar');
+      pr.delay = 60;                              // 60f telegraph
     }
   }
 
@@ -1003,9 +1104,19 @@ export class GameEngine {
       if (!pr.active) continue;
 
       // ── 지연 예고 투사체: delay 동안은 정지, delay=0 되면 폭발 판정 1회 후 소멸 ──
+      // (travelFramesLeft가 있으면 delay 중 이동 — traveling preview 패턴) ──
       if (pr.delay !== undefined && pr.delay > 0) {
         pr.delay--;
-        pr.life--;  // 예고 라이프도 소진
+        pr.life--;
+        if (pr.travelFramesLeft !== undefined && pr.travelFramesLeft > 0) {
+          pr.x += pr.vx;
+          pr.y += pr.vy;
+          pr.travelFramesLeft--;
+          if (pr.travelFramesLeft === 0) {
+            pr.vx = 0; pr.vy = 0;
+            pr.travelFramesLeft = undefined;
+          }
+        }
         if (pr.life <= 0) { pr.active = false; continue; }
         continue;
       }
@@ -1037,7 +1148,16 @@ export class GameEngine {
       }
 
       // ── 회전 궤적 — dark_tendril ──
-      if (pr.spinAngle !== undefined && pr.spinSpeed !== undefined) {
+      // ── orbit-then-escape: orbitalReleaseAt 만료 시 spinSpeed=0 (earth A) ──
+      if (pr.orbitalReleaseAt !== undefined) {
+        pr.orbitalReleaseAt--;
+        if (pr.orbitalReleaseAt <= 0) {
+          pr.spinSpeed = 0;
+          pr.orbitalReleaseAt = undefined;
+        }
+      }
+      // 자체 회전 (vx/vy 방향 curve) — orbitRadius 세팅되면 orbital path만 따라가므로 skip
+      if (pr.orbitRadius === undefined && pr.spinAngle !== undefined && pr.spinSpeed !== undefined) {
         pr.spinAngle += pr.spinSpeed;
         const speed = Math.sqrt(pr.vx * pr.vx + pr.vy * pr.vy) || 1;
         pr.vx = Math.cos(pr.spinAngle) * speed;
@@ -1058,8 +1178,15 @@ export class GameEngine {
         pr.y += (pr.wavePerpY ?? 0) * dPerp;
       }
 
-      pr.x += pr.vx;
-      pr.y += pr.vy;
+      // 위치 업데이트 — orbital (origin 중심 원궤도) OR linear.
+      if (pr.orbitRadius !== undefined && pr.originX !== undefined && pr.originY !== undefined) {
+        pr.spinAngle = (pr.spinAngle ?? 0) + (pr.spinSpeed ?? 0);
+        pr.x = pr.originX + pr.orbitRadius * Math.cos(pr.spinAngle);
+        pr.y = pr.originY + pr.orbitRadius * Math.sin(pr.spinAngle);
+      } else {
+        pr.x += pr.vx;
+        pr.y += pr.vy;
+      }
       pr.life--;
       if (pr.life <= 0) {
         // 소멸 시 radial 서브-투사체 방출 (resonance lock 등)
@@ -5362,6 +5489,18 @@ export class GameEngine {
     }
   }
 
+  /** DEV: 특정 타입 보스 직접 소환 (shift+1~6 핫키) */
+  private devSpawnSpecificBoss(bossType: EnemyType) {
+    const p = this.state.player;
+    const ok = spawnEnemy(this.state.enemies, bossType, p.x, p.y, this.state.cameraX, this.state.cameraY, this.state.wave);
+    if (ok) {
+      this.placeBossInView(bossType);
+      console.info(`[dev] spawned ${bossType} (direct)`);
+    } else {
+      console.warn('[dev] spawn failed — pool full');
+    }
+  }
+
   /** DEV: 모든 활성 보스 즉사 */
   private devKillAllBosses() {
     for (let i = 0; i < this.state.enemies.length; i++) {
@@ -5650,7 +5789,7 @@ export class GameEngine {
     // drawElementOrbs(this.entityLayer, this.state, this.elementOrbGfx);
     drawParticles(this.particleRenderer, this.state);
     drawWeaponEffects(this.effectLayer, this.state, this.effectGfx);
-    drawEnemyProjectiles(this.enemyProjectileGfx, this.state);
+    drawEnemyProjectiles(this.enemyProjectileGfx, this.enemyProjectileGlowGfx, this.state);
     drawPlayerBars(this.playerBarsGfx, this.state);
     applyCamera(this.worldContainer, this.state, this.playerLayer);
     updateUI(this.ui, this.state);
