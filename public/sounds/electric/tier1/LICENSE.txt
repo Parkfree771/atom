@@ -1,0 +1,12 @@
+CC0 (Public Domain) — sourced from OpenGameArt.org.
+
+Attacks (public/sounds/electric/tier1/attacks/):
+  continuousspark.wav
+    Source: https://opengameart.org/content/electricity-sound-effects-0
+    (Brian MacIntosh)
+
+Hits (public/sounds/electric/tier1/hits/):
+  death.wav (originally death_1.wav on upstream)
+    Source: https://opengameart.org/content/electricity-game-sound-pack
+
+License: CC0 — no attribution required, commercial use permitted.

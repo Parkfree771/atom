@@ -44,6 +44,7 @@ export class LightEffect {
 
   // 엔진이 읽는 공개 상태
   beamFiredThisFrame = false;
+  chargeStartedThisFrame = false;
   beamDirection = 0;
 
   // 차징 광점
@@ -69,6 +70,7 @@ export class LightEffect {
     this.phaseTimer = 0;
     this.chargeParticles = [];
     this.beamFiredThisFrame = false;
+    this.chargeStartedThisFrame = true;
     this.container.position.set(x, y);
     this.container.visible = true;
   }
@@ -88,6 +90,7 @@ export class LightEffect {
     if (!this.active) return;
     this.time += dt;
     this.beamFiredThisFrame = false;
+    this.chargeStartedThisFrame = false;
     this.phaseTimer += dt;
 
     if (this.phase === LightPhase.CHARGING) {
@@ -103,6 +106,7 @@ export class LightEffect {
       if (this.phaseTimer >= this.FIRE_DURATION) {
         this.phase = LightPhase.CHARGING;
         this.phaseTimer = 0;
+        this.chargeStartedThisFrame = true;
       }
     }
 

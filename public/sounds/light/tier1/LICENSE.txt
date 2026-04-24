@@ -1,0 +1,7 @@
+CC0 (Public Domain) — sourced from OpenGameArt.org.
+
+Attacks (public/sounds/light/tier1/attacks/):
+  chargestart.wav — used as the light "charge→fire" attack sample
+    Source: https://opengameart.org/content/electricity-game-sound-pack
+
+License: CC0 — no attribution required, commercial use permitted.

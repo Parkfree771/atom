@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { GameEngine } from './engine';
 import { LevelEvent, LevelEventResolution, SkillId, PlayerState } from './types';
 import { LevelUpOverlay } from './levelup/LevelUpOverlay';
+import { unlockAudio } from '../sound/context';
 
 // ── 라이트 테마 토큰 ──
 const C = {
@@ -46,6 +47,15 @@ export default function SurvivorsGame() {
     engine.onLevelEvent = (event) => setPendingEvent(event);
     engine.init(containerRef.current);
 
+    // Unlock Web Audio on first user gesture (autoplay policy)
+    const unlock = () => {
+      void unlockAudio();
+      window.removeEventListener('keydown', unlock);
+      window.removeEventListener('pointerdown', unlock);
+    };
+    window.addEventListener('keydown', unlock);
+    window.addEventListener('pointerdown', unlock);
+
     // HUD refresh — ~30Hz
     let raf = 0;
     let last = 0;
@@ -57,6 +67,8 @@ export default function SurvivorsGame() {
 
     return () => {
       cancelAnimationFrame(raf);
+      window.removeEventListener('keydown', unlock);
+      window.removeEventListener('pointerdown', unlock);
       engine.destroy();
       engineRef.current = null;
     };
