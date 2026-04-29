@@ -1,5 +1,5 @@
 import * as PIXI from 'pixi.js';
-import { fireTier1Sound, earthTier1Sound, waterTier1Sound } from '../../sound/gameSounds';
+import type { EnemyType } from '../types';
 import { WaterEffect } from './WaterEffect';
 import { EarthEffect } from './EarthEffect';
 import { FireEffect } from './FireEffect';
@@ -131,7 +131,6 @@ export class EffectManager {
     }
     if (!this.waterEffect.active) {
       this.waterEffect.start(x, y, radius);
-      waterTier1Sound.startAttack();
     }
   }
 
@@ -142,9 +141,6 @@ export class EffectManager {
   }
 
   stopWater() {
-    if (this.waterEffect?.active) {
-      waterTier1Sound.stopAttack();
-    }
     this.waterEffect?.stop();
   }
 
@@ -156,7 +152,6 @@ export class EffectManager {
     }
     if (!this.earthEffect.active) {
       this.earthEffect.start(x, y, radius);
-      earthTier1Sound.startAttack();
     }
   }
 
@@ -167,9 +162,6 @@ export class EffectManager {
   }
 
   stopEarth() {
-    if (this.earthEffect?.active) {
-      earthTier1Sound.stopAttack();
-    }
     this.earthEffect?.stop();
   }
 
@@ -181,7 +173,6 @@ export class EffectManager {
     }
     if (!this.fireEffect.active) {
       this.fireEffect.start(x, y, range, direction);
-      fireTier1Sound.startAttack();
     }
   }
 
@@ -198,9 +189,6 @@ export class EffectManager {
   }
 
   stopFire() {
-    if (this.fireEffect?.active) {
-      fireTier1Sound.stopAttack();
-    }
     this.fireEffect?.stop();
   }
 
@@ -234,11 +222,6 @@ export class EffectManager {
   /** 빔이 이번 프레임에 발사됐는지 (엔진이 데미지 판정에 사용) */
   lightBeamFired(): boolean {
     return this.lightEffect?.beamFiredThisFrame ?? false;
-  }
-
-  /** 차지(입자 모이기) 페이즈가 이번 프레임에 시작됐는지 — 사운드 싱크용 */
-  lightChargeStarted(): boolean {
-    return this.lightEffect?.chargeStartedThisFrame ?? false;
   }
 
   lightBeamAngle(): number {
@@ -1203,7 +1186,7 @@ export class EffectManager {
   }
 
   /** 흡인 + DoT + 체인 (rule 5 내장) */
-  updateWaterElectricDarkPull(dt: number, enemies: Array<{ x: number; y: number; active: boolean }>) {
+  updateWaterElectricDarkPull(dt: number, enemies: Array<{ x: number; y: number; active: boolean; type: EnemyType }>) {
     this.waterElectricDarkEffect?.updatePull(dt, enemies);
   }
 

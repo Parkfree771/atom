@@ -18,7 +18,7 @@ import {
 import { SpatialHash, checkProjectileEnemyCollisions, checkPlayerEnemyCollisions, checkWeaponEffectEnemyCollisions } from './collision';
 import { createParticlePool, updateParticles, spawnExplosionParticles, spawnHitParticles, spawnLevelUpParticles } from './particles';
 import { spawnWaveEnemies, getMaxEnemies } from './spawner';
-import { fireTier1Sound, earthTier1Sound, electricTier1Sound, lightTier1Sound, darkTier1Sound, waterTier1Sound } from '../sound/gameSounds';
+import { playHit, playHitChain, playHitField, playHitBeam, playKill } from '../sound/gameSounds';
 import { getWeaponForElements, activateAllWeapons, updateWeaponEffects } from './weapons';
 import {
   createGameGraphics, drawGround, drawPlayer, createPlayerSprite, drawEnemies,
@@ -5177,7 +5177,7 @@ export class GameEngine {
       this.effectManager.startWater(px, py, waterRadius);
       this.effectManager.updateWaterPosition(px, py);
       const waterCandidates = this.spatialHash.query(px, py, waterRadius * 2, waterRadius * 2, enemies.length);
-      let waterHitAny = false;
+      let waterHitCount = 0;
       for (let ci = 0; ci < waterCandidates.length; ci++) {
         const i = waterCandidates[ci];
         const e = enemies[i];
@@ -5201,12 +5201,12 @@ export class GameEngine {
             }
             e.hp -= 8;
             spawnHitParticles(particles, e.x, e.y, 0x2563eb);
-            waterHitAny = true;
+            waterHitCount++;
             if (e.hp <= 0) this.killEnemy(i);
           }
         }
       }
-      if (waterHitAny) waterTier1Sound.playHit();
+      playHitField(waterHitCount);
     } else {
       this.effectManager.stopWater();
     }
@@ -5219,7 +5219,7 @@ export class GameEngine {
       this.effectManager.startEarth(px, py, earthRadius);
       this.effectManager.updateEarthPosition(px, py);
       const earthCandidates = this.spatialHash.query(px, py, earthRadius * 2, earthRadius * 2, enemies.length);
-      let earthHitAny = false;
+      let earthHitCount = 0;
       for (let ci = 0; ci < earthCandidates.length; ci++) {
         const i = earthCandidates[ci];
         const e = enemies[i];
@@ -5238,12 +5238,12 @@ export class GameEngine {
           if (pulseFrame) {
             e.hp -= 6;
             spawnHitParticles(particles, e.x, e.y, 0xa16207);
-            earthHitAny = true;
+            earthHitCount++;
             if (e.hp <= 0) this.killEnemy(i);
           }
         }
       }
-      if (earthHitAny) earthTier1Sound.playHit();
+      playHitField(earthHitCount);
     } else {
       this.effectManager.stopEarth();
     }
@@ -5272,7 +5272,7 @@ export class GameEngine {
       this.effectManager.updateFireDirection(fireAngle);
       if (this.state.frameCount % 10 === 0) {
         const fireConeCandidates = this.spatialHash.query(px, py, fireRange * 2, fireRange * 2, enemies.length);
-        let fireHitAny = false;
+        let fireHitCount = 0;
         for (let ci = 0; ci < fireConeCandidates.length; ci++) {
           const i = fireConeCandidates[ci];
           const e = enemies[i];
@@ -5288,11 +5288,11 @@ export class GameEngine {
           if (Math.abs(angleDiff) < coneHalfAngle) {
             e.hp -= 5;
             spawnHitParticles(particles, e.x, e.y, 0xef4444);
-            fireHitAny = true;
+            fireHitCount++;
             if (e.hp <= 0) this.killEnemy(i);
           }
         }
-        if (fireHitAny) fireTier1Sound.playHit();
+        playHitField(fireHitCount);
       }
     } else {
       this.effectManager.stopFire();
@@ -5317,14 +5317,11 @@ export class GameEngine {
       this.effectManager.startLight(px, py);
       this.effectManager.updateLightPosition(px, py);
       this.effectManager.updateLightDirection(lightAngle);
-      if (this.effectManager.lightChargeStarted()) {
-        lightTier1Sound.fireChargeSample();
-      }
       if (this.effectManager.lightBeamFired()) {
         const angle = this.effectManager.lightBeamAngle();
         const dirX = Math.cos(angle);
         const dirY = Math.sin(angle);
-        let lightHitAny = false;
+        let lightHitCount = 0;
         for (let i = 0; i < enemies.length; i++) {
           const e = enemies[i];
           if (!e.active) continue;
@@ -5336,15 +5333,14 @@ export class GameEngine {
           if (perpDist < beamWidth) {
             e.hp -= 25;
             spawnHitParticles(particles, e.x, e.y, 0xfef08a);
-            lightHitAny = true;
+            lightHitCount++;
             if (e.hp <= 0) this.killEnemy(i);
           }
         }
-        if (lightHitAny) lightTier1Sound.playHit();
+        playHitBeam(lightHitCount);
       }
     } else {
       this.effectManager.stopLight();
-      lightTier1Sound.stopAll();
     }
 
     // ── 전기 1단계 (감전 체인) ──
@@ -5381,13 +5377,12 @@ export class GameEngine {
           curY = enemies[bestIdx].y;
         }
         if (chainTargets.length > 0) {
-          electricTier1Sound.fireAttack();
+          playHitChain(chainTargets.length);
           for (let ci = 0; ci < chainTargets.length; ci++) {
             const e = enemies[chainTargets[ci]];
             const dmg = Math.max(5, 16 - ci * 2);
             e.hp -= dmg;
             spawnHitParticles(particles, e.x, e.y, 0xa78bfa);
-            electricTier1Sound.playHit();
             if (e.hp <= 0) this.killEnemy(chainTargets[ci]);
           }
           this._electricSingleChainNodes = chainTargets.map((ci) => ({
@@ -5434,13 +5429,12 @@ export class GameEngine {
         this._darkSinglePosX = px;
         this._darkSinglePosY = py;
         this.effectManager.startDark(px, py, darkRadius);
-        darkTier1Sound.startAttack();
       }
       const dhx = this._darkSinglePosX;
       const dhy = this._darkSinglePosY;
       const darkCandidates = this.spatialHash.query(dhx, dhy, darkRadius * 2, darkRadius * 2, enemies.length);
       const pulseFrame = this.state.frameCount % 40 === 0;
-      let darkHitAny = false;
+      let darkHitCount = 0;
       for (let ci = 0; ci < darkCandidates.length; ci++) {
         const i = darkCandidates[ci];
         const e = enemies[i];
@@ -5457,17 +5451,16 @@ export class GameEngine {
           if (pulseFrame) {
             e.hp -= 5;
             spawnHitParticles(particles, e.x, e.y, 0x7c3aed);
-            darkHitAny = true;
+            darkHitCount++;
             if (e.hp <= 0) this.killEnemy(i);
           }
         }
       }
-      if (darkHitAny) darkTier1Sound.playHit();
+      playHitField(darkHitCount);
     } else {
       if (this._darkSinglePlaced) {
         this._darkSinglePlaced = false;
         this.effectManager.stopDark();
-        darkTier1Sound.stopAttack();
       }
     }
   }
@@ -5797,6 +5790,7 @@ export class GameEngine {
 
     const wasBoss = isBossType(e.type);
     spawnExplosionParticles(this.state.particles, e.x, e.y, e.color, wasBoss ? 40 : 10);
+    playKill({ boss: wasBoss });
 
     // DEV: XP 오브, 원소 오브 드랍 제거
     // spawnXPOrb(this.state.xpOrbs, e.x, e.y, e.xp);

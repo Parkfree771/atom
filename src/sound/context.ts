@@ -7,8 +7,19 @@ export function getAudioContext(): AudioContext {
     const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     ctx = new AC();
     master = ctx.createGain();
-    master.gain.value = 0.7;
-    master.connect(ctx.destination);
+    master.gain.value = 0.23;
+
+    // Limiter — prevents clipping when many heavy sounds stack (chain hits, ult).
+    // Threshold/ratio tuned to be transparent for single hits, catch only stacked peaks.
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -8;
+    limiter.knee.value = 10;
+    limiter.ratio.value = 10;
+    limiter.attack.value = 0.005;
+    limiter.release.value = 0.18;
+
+    master.connect(limiter);
+    limiter.connect(ctx.destination);
   }
   return ctx;
 }

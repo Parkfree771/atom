@@ -1,6 +1,6 @@
 import * as PIXI from 'pixi.js';
 import { swapPop } from './utils';
-import { isBossType } from '../types';
+import { isBossType, type EnemyType } from '../types';
 
 /**
  * 물+전기+암흑 3단계 — 흑뢰 토네이도 (Dark Thunder Tornado)
@@ -471,7 +471,7 @@ export class WaterElectricDarkEffect {
   }
 
   /** 엔진이 프레임마다 호출 — 적 흡인, DoT, 체인 등 처리 */
-  updatePull(dt: number, enemies: Array<{ x: number; y: number; active: boolean }>) {
+  updatePull(dt: number, enemies: Array<{ x: number; y: number; active: boolean; type: EnemyType }>) {
     if (!this.active) return;
     this.hitsBuffer = [];
 

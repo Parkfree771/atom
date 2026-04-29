@@ -1539,8 +1539,8 @@ function drawSpacetimeMesh(
     for (let k = 0; k < 16; k++) {
       const a = k * Math.PI / 8 + t * 0.035;
       // 바깥→안쪽 방향 짧은 line (length는 progress 따라 길어짐)
-      const rOut = R[0] * (0.95 + pullIntensity * 0.30);
-      const rIn = R[0] * (0.25 + pullIntensity * 0.15);
+      const rOut = _meshR[0] * (0.95 + pullIntensity * 0.30);
+      const rIn = _meshR[0] * (0.25 + pullIntensity * 0.15);
       const ca = Math.cos(a), sa = Math.sin(a);
       glow.moveTo(cx + ca * rOut, cy + sa * rOut);
       glow.lineTo(cx + ca * rIn, cy + sa * rIn);
