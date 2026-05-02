@@ -18,7 +18,7 @@ import {
 import { SpatialHash, checkProjectileEnemyCollisions, checkPlayerEnemyCollisions, checkWeaponEffectEnemyCollisions } from './collision';
 import { createParticlePool, updateParticles, spawnExplosionParticles, spawnHitParticles, spawnLevelUpParticles } from './particles';
 import { spawnWaveEnemies, getMaxEnemies } from './spawner';
-import { playHit, playHitChain, playHitField, playHitBeam, playKill } from '../sound/gameSounds';
+import { playHit, playHitChain, playHitBeam, playKill, playFieldDrop, playImpact, playGravitonThud, playAtomicDecay, playIsotopeWarp, playDeepBoom, playRollingBoom, playDynamoClap, playRiftBurst, playMireZap, startFireRoar, stopFireRoar, setDeepHumActive, setAbyssShimmerActive, setTornadoHowlActive, setGravityWellActive, setMireSwampActive } from '../sound/gameSounds';
 import { getWeaponForElements, activateAllWeapons, updateWeaponEffects } from './weapons';
 import {
   createGameGraphics, drawGround, drawPlayer, createPlayerSprite, drawEnemies,
@@ -1500,6 +1500,27 @@ export class GameEngine {
     const hasEarthLightElectricCombo = activeEffects.has('c3:빛,전기,흙');
     const hasEarthElectricDarkCombo = activeEffects.has('c3:암흑,전기,흙');
 
+    // deepHum loop — c2 지속형 4종 + c3 사이클 gathering 페이즈 4종 (effectManager query는 ?? false fallback 안전)
+    setDeepHumActive(
+      hasWaterDarkCombo || hasWaterEarthCombo || hasElectricDarkCombo || hasEarthElectricCombo
+      || (hasWaterLightDarkCombo && this.effectManager.waterLightDarkIsConverging())
+      || (hasFireLightDarkCombo && this.effectManager.fireLightDarkConverging())
+      || (hasWaterFireElectricCombo && this.effectManager.waterFireElectricIsPressuring())
+      || (hasEarthLightDarkCombo && this.effectManager.earthLightDarkIsConverging())
+    );
+
+    // 종말의 먹구름 — 콤보 활성 동안 abyss-shimmer loop 계속
+    setAbyssShimmerActive(hasWaterFireDarkCombo);
+
+    // 흑뢰 토네이도 — 콤보 활성 동안 tornado-howl loop 계속
+    setTornadoHowlActive(hasWaterElectricDarkCombo);
+
+    // 은하 소용돌이 — 콤보 활성 동안 gravity-well loop 계속
+    setGravityWellActive(hasWaterEarthDarkCombo);
+
+    // 감전 퀵샌드 — 콤보 활성 동안 mire-swamp loop 계속 (DoT zap은 콤보 블록 내에서)
+    setMireSwampActive(hasWaterEarthElectricCombo);
+
     const { enemies, particles } = this.state;
 
     if (hasWaterFireCombo) {
@@ -1510,6 +1531,7 @@ export class GameEngine {
 
       // 폭발 발동 순간: 광역 처리
       if (this.effectManager.waterFireBurstFired()) {
+        playImpact();
         const center = this.effectManager.waterFireBurstCenter();
         const burstR = this.effectManager.waterFireBurstRadius();
         const burstR2 = burstR * burstR;
@@ -1614,6 +1636,7 @@ export class GameEngine {
 
       // 발사 순간: 캐릭터에서 적 방향 직선 위 적에게 데미지 (빛 1단계 패턴)
       if (this.effectManager.waterLightBeamFired()) {
+        playAtomicDecay();
         const fireAngle = this.effectManager.waterLightBeamAngle();
         const cosA = Math.cos(fireAngle);
         const sinA = Math.sin(fireAngle);
@@ -1734,6 +1757,8 @@ export class GameEngine {
       this.effectManager.updateWaterElectricPosition(px, py);
 
       const stormCandidates = this.spatialHash.query(px, py, stormRadius * 2, stormRadius * 2, enemies.length);
+      const isWaterElectricPulse = this.state.frameCount % 45 === 0;
+      let waterElectricHitCount = 0;
       for (let ci = 0; ci < stormCandidates.length; ci++) {
         const i = stormCandidates[ci];
         const e = enemies[i];
@@ -1752,15 +1777,17 @@ export class GameEngine {
           }
 
           // 감전 데미지 (45프레임마다 = ~0.75초, 느리지만 강한 한방)
-          if (this.state.frameCount % 45 === 0) {
+          if (isWaterElectricPulse) {
             e.hp -= 18;
             // 전기 히트 파티클 (노랑 여러 개)
             spawnHitParticles(particles, e.x, e.y, 0xfde047);
             spawnHitParticles(particles, e.x + (Math.random() - 0.5) * 10, e.y + (Math.random() - 0.5) * 10, 0xeab308);
+            waterElectricHitCount++;
             if (e.hp <= 0) this.killEnemy(i);
           }
         }
       }
+      if (isWaterElectricPulse) playFieldDrop(waterElectricHitCount);
 
       // 개별 물/전기 이펙트 중지
       this.effectManager.stopWater();
@@ -1869,6 +1896,11 @@ export class GameEngine {
       }
       this.effectManager.updateWaterEarthElectricTeslaTargets(teslaTargets3);
 
+      // DoT 펄스 zap — 24f 주기, 적이 존재할 때만
+      if (this.state.frameCount % 24 === 0 && teslaTargets3.length > 0) {
+        playMireZap();
+      }
+
       // 1단계 물/흙/전기 + 다른 2단계 조합 정지
       // ※ 다른 슬롯에서 같은 2원소 조합이 활성 중이면 끄지 않음
       this.effectManager.stopWater();
@@ -1948,6 +1980,7 @@ export class GameEngine {
 
       // RECONNECT 발화 — 자화 적 전원에 검은 번개 (40뎀) + 반경 내 전원 파열 (25뎀)
       if (this.effectManager.earthElectricDarkReconnectFired()) {
+        playDynamoClap();
         // 자화 적 직격 (40뎀)
         const struck = new Set<number>();
         for (const idx of dynamoTargetIdx) {
@@ -2054,6 +2087,7 @@ export class GameEngine {
       // 폭발 발동 처리: 이번 프레임에 폭발한 링들 (도넛 영역)
       const bursts = this.effectManager.earthFireBurstFires();
       for (const b of bursts) {
+        playGravitonThud();
         const inner = b.radius - b.ringWidth / 2;
         const outer = b.radius + b.ringWidth / 2;
         const inner2 = inner * inner;
@@ -2140,6 +2174,7 @@ export class GameEngine {
 
       // 발사 순간: 캐릭터에서 빔 방향 직선 위 적에게 데미지 (관통)
       if (this.effectManager.fireLightBeamFired()) {
+        playAtomicDecay();
         const fireAngle = this.effectManager.fireLightBeamAngle();
         const cosA = Math.cos(fireAngle);
         const sinA = Math.sin(fireAngle);
@@ -2198,6 +2233,7 @@ export class GameEngine {
 
       // 발사 순간: 7발 동시 데미지 (메인 1 + 분산 6)
       if (this.effectManager.earthLightBeamFired()) {
+        playAtomicDecay();
         const mainAngle = this.effectManager.earthLightBeamMainAngle();
         const spreadOffsets = this.effectManager.earthLightSpreadOffsets();
         const MAIN_RANGE = 1800;
@@ -2277,6 +2313,7 @@ export class GameEngine {
 
       // SUPERNOVA 폭발 발동 순간: 광역 데미지 + 넉백 + 사방 빔 16발 데미지
       if (this.effectManager.lightDarkSupernovaFired()) {
+        playImpact();
         const center = this.effectManager.lightDarkSupernovaCenter();
         const burstR = this.effectManager.lightDarkSupernovaRadius();
         const burstR2 = burstR * burstR;
@@ -2365,6 +2402,9 @@ export class GameEngine {
       // 이번 프레임에 착탄한 운석들 처리
       const impacts = this.effectManager.earthDarkImpactsThisFrame();
       if (impacts.length > 0) {
+        // 다중 운석 동시 착탄 시 ×2까지만 (coreCollapse는 freq 지터로 stacking 안전하지만 한도 둠)
+        const impactSoundCount = Math.min(impacts.length, 2);
+        for (let s = 0; s < impactSoundCount; s++) playImpact();
         const impactR = this.effectManager.earthDarkImpactRadius();
         const impactR2 = impactR * impactR;
         const METEOR_DAMAGE = 12;
@@ -2420,6 +2460,7 @@ export class GameEngine {
 
       // 폭발 발동 순간: 광역 처리
       if (this.effectManager.fireDarkBurstFired()) {
+        playImpact();
         const center = this.effectManager.fireDarkCenter();
         const burstR = this.effectManager.fireDarkBurstRadius();
         const burstR2 = burstR * burstR;
@@ -2578,6 +2619,7 @@ export class GameEngine {
 
       // ── CORONA_BURST 발동 1프레임: 광역 120뎀 + 넉백 ──
       if (this.effectManager.waterLightDarkBurstFired()) {
+        playDeepBoom();
         const center = this.effectManager.waterLightDarkConvergeCenter();
         const burstR = this.effectManager.waterLightDarkBurstRadius();
         const burstR2 = burstR * burstR;
@@ -2674,6 +2716,7 @@ export class GameEngine {
 
       // ── EXPLODE 발동 1프레임: 광역 200뎀 + 넉백 ──
       if (this.effectManager.fireLightDarkExplosionFired()) {
+        playDeepBoom();
         const center = this.effectManager.fireLightDarkConvergeCenter();
         const burstR = this.effectManager.fireLightDarkExplosionRadius();
         const burstR2 = burstR * burstR;
@@ -2761,6 +2804,7 @@ export class GameEngine {
       // 이번 프레임 명중 처리
       const hits = this.effectManager.lightElectricDarkHits();
       if (hits.length > 0) {
+        playIsotopeWarp();
         const chainLinesBatch: Array<{ x0: number; y0: number; x1: number; y1: number }> = [];
         for (const h of hits) {
           const e = enemies[h.targetIdx];
@@ -2915,6 +2959,7 @@ export class GameEngine {
 
       // ── 버스트 발동: 설치 크랙의 세그먼트 기준 광역 피해 + 대규모 3색 폭발 파티클 ──
       if (this.effectManager.earthFireDarkBurstFired() && segments.length > 0) {
+        playRiftBurst();
         const hitThresh = this.effectManager.earthFireDarkBurstHitThreshold();
         const hitThresh2 = hitThresh * hitThresh;
         const dmg = this.effectManager.earthFireDarkBurstDamage();
@@ -3047,6 +3092,7 @@ export class GameEngine {
       // ── 활성 체인: 모든 pending 동시 처리 ──
       if (this._fedPending.length > 0) {
         const newPending: typeof this._fedPending = [];
+        let explosionsThisFrame = 0;
 
         for (let pi = this._fedPending.length - 1; pi >= 0; pi--) {
           const p = this._fedPending[pi];
@@ -3057,6 +3103,7 @@ export class GameEngine {
           }
 
           // ── 타이머 만료 → 폭발! ──
+          explosionsThisFrame++;
           const te = enemies[p.idx];
           const detX = (te && te.active) ? te.x : p.x;
           const detY = (te && te.active) ? te.y : p.y;
@@ -3127,6 +3174,12 @@ export class GameEngine {
           }
         }
 
+        // 핵분열 cascade: 한 프레임에 여러 폭발 가능 (1→3→9), cap 2로 음향 폭주 회피
+        if (explosionsThisFrame > 0) {
+          const n = Math.min(explosionsThisFrame, 2);
+          for (let s = 0; s < n; s++) playImpact();
+        }
+
         this._fedPending = newPending;
       }
 
@@ -3183,6 +3236,8 @@ export class GameEngine {
 
       // ── FLASH: 섬광 데미지 + 넉백 ──
       if (this.effectManager.earthLightDarkFlashFired()) {
+        playDeepBoom();
+        playRollingBoom();
         const anchor = this.effectManager.earthLightDarkAnchor();
         const flashR = this.effectManager.earthLightDarkFlashRadius();
         const flashR2 = flashR * flashR;
@@ -3255,6 +3310,7 @@ export class GameEngine {
 
       // ── RELEASE: 대폭발 + 넉백 + 전기 체인 전이 ──
       if (this.effectManager.waterFireElectricReleaseFired()) {
+        playDeepBoom();
         const burstR = this.effectManager.waterFireElectricBurstRadius();
         const burstR2 = burstR * burstR;
 
@@ -3363,6 +3419,10 @@ export class GameEngine {
 
       // 착탄 — 전 유성 직격 뎀 + 타입별 추가 효과
       const imps = this.effectManager.waterEarthFireImpacts();
+      if (imps.length > 0) {
+        const n = Math.min(imps.length, 2);
+        for (let s = 0; s < n; s++) playImpact();
+      }
       for (const imp of imps) {
         const impCandidates = this.spatialHash.query(imp.x, imp.y, impR * 2, impR * 2, enemies.length);
         for (let ci = 0; ci < impCandidates.length; ci++) {
@@ -3440,12 +3500,17 @@ export class GameEngine {
 
       const impacts = this.effectManager.earthFireElectricImpactsThisFrame();
       if (impacts.length > 0) {
+        // 운석 임팩트 사운드 (cap 2)
+        const meteorSoundN = Math.min(impacts.length, 2);
+        for (let s = 0; s < meteorSoundN; s++) playImpact();
+
         const impR = this.effectManager.earthFireElectricImpactRadius();
         const impR2 = impR * impR;
         const METEOR_DMG = 18;
         const METEOR_KNOCK = 8;
         const CHAIN_DMG = 12;
         const CHAIN_HOP_R2 = 180 * 180;
+        let chainHitTotal = 0;
 
         for (const impact of impacts) {
           // 1) 착탄 데미지 + 넉백
@@ -3492,6 +3557,7 @@ export class GameEngine {
               }
               if (bestIdx < 0) continue;
               chainUsed.add(bestIdx);
+              chainHitTotal++;
               enemies[bestIdx].hp -= CHAIN_DMG;
               spawnHitParticles(particles, enemies[bestIdx].x, enemies[bestIdx].y, 0x22d3ee);
               this.effectManager.addEarthFireElectricChain(src.x, src.y, enemies[bestIdx].x, enemies[bestIdx].y);
@@ -3501,6 +3567,7 @@ export class GameEngine {
             wave = nextWave;
           }
         }
+        if (chainHitTotal > 0) playHitChain(chainHitTotal);
       }
 
       // 하위 이펙트 정지
@@ -3528,6 +3595,7 @@ export class GameEngine {
 
       const impacts = this.effectManager.earthFireLightImpactsThisFrame();
       if (impacts.length > 0) {
+        playImpact();
         const impR = this.effectManager.earthFireLightImpactRadius();
         const impR2 = impR * impR;
         const METEOR_DMG = 280;
@@ -3673,6 +3741,7 @@ export class GameEngine {
       // ── 이번 프레임 명중 이벤트 처리: 주 피해 + 3원소 임팩트 + 체인 확산 ──
       const hits = this.effectManager.waterLightElectricHitsThisFrame();
       if (hits.length > 0) {
+        playIsotopeWarp();
         const PRIMARY_DAMAGE = 220;
         const CHAIN_DAMAGES = [150, 110, 80, 60, 50];
         const CHAIN_COUNT = 5;
@@ -3784,6 +3853,7 @@ export class GameEngine {
       // ── 이번 프레임 명중 처리 ──
       const hits = this.effectManager.fireLightElectricHitsThisFrame();
       if (hits.length > 0) {
+        playIsotopeWarp();
         const PRIMARY_DAMAGE = 240;
         const CHAIN_DAMAGES = [160, 115, 80, 60, 50];
         const CHAIN_COUNT = 5;
@@ -3866,6 +3936,7 @@ export class GameEngine {
       // 이번 프레임 빗방울 히트 → 데미지 처리
       const hits = this.effectManager.waterFireLightHitsThisFrame();
       if (hits.length > 0) {
+        playIsotopeWarp();
         const IMPACT_DAMAGE = 55;
         for (const h of hits) {
           const e = enemies[h.enemyIdx];
@@ -3997,6 +4068,7 @@ export class GameEngine {
 
       const hits = this.effectManager.waterEarthLightHitsThisFrame();
       if (hits.length > 0) {
+        playIsotopeWarp();
         for (const h of hits) {
           const e = enemies[h.enemyIdx];
           if (!e || !e.active) continue;
@@ -4081,6 +4153,7 @@ export class GameEngine {
       // ── 미사일 명중 처리 ──
       const hits = this.effectManager.earthLightElectricHitsThisFrame();
       if (hits.length > 0) {
+        playIsotopeWarp();
         const PRIMARY_DAMAGE = 180;
         const MISSILE_STUN = 25;
         const CHAIN_DAMAGES_HIT = [130, 95, 65, 50, 40];
@@ -4375,6 +4448,8 @@ export class GameEngine {
           allChainTargets.push(...chainTargets);
         }
 
+        if (allChainTargets.length > 0) playHitChain(allChainTargets.length);
+
         // 다중 체인: 볼트 수명이 짧아 적 추적 불필요 — 빈 배열로 두어 updateChainPositions 스킵
         this._fireElectricChainNodes = [];
       }
@@ -4505,6 +4580,8 @@ export class GameEngine {
           }
           this.effectManager.fireLightElectricChain(chainPoints);
         }
+
+        if (globalUsed.size > 0) playHitChain(globalUsed.size);
 
         // 다중 체인: 볼트 수명이 짧아 적 추적 불필요
         this._electricChainNodes = [];
@@ -5206,7 +5283,7 @@ export class GameEngine {
           }
         }
       }
-      playHitField(waterHitCount);
+      playFieldDrop(waterHitCount);
     } else {
       this.effectManager.stopWater();
     }
@@ -5243,7 +5320,7 @@ export class GameEngine {
           }
         }
       }
-      playHitField(earthHitCount);
+      playFieldDrop(earthHitCount);
     } else {
       this.effectManager.stopEarth();
     }
@@ -5270,9 +5347,9 @@ export class GameEngine {
       this.effectManager.startFire(px, py, fireRange, fireAngle);
       this.effectManager.updateFirePosition(px, py);
       this.effectManager.updateFireDirection(fireAngle);
+      startFireRoar();
       if (this.state.frameCount % 10 === 0) {
         const fireConeCandidates = this.spatialHash.query(px, py, fireRange * 2, fireRange * 2, enemies.length);
-        let fireHitCount = 0;
         for (let ci = 0; ci < fireConeCandidates.length; ci++) {
           const i = fireConeCandidates[ci];
           const e = enemies[i];
@@ -5288,14 +5365,13 @@ export class GameEngine {
           if (Math.abs(angleDiff) < coneHalfAngle) {
             e.hp -= 5;
             spawnHitParticles(particles, e.x, e.y, 0xef4444);
-            fireHitCount++;
             if (e.hp <= 0) this.killEnemy(i);
           }
         }
-        playHitField(fireHitCount);
       }
     } else {
       this.effectManager.stopFire();
+      stopFireRoar();
     }
 
     // ── 빛 1단계 (레이저 빔) ──
@@ -5456,7 +5532,7 @@ export class GameEngine {
           }
         }
       }
-      playHitField(darkHitCount);
+      playFieldDrop(darkHitCount);
     } else {
       if (this._darkSinglePlaced) {
         this._darkSinglePlaced = false;

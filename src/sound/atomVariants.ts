@@ -259,10 +259,87 @@ export const neutrinoShimmer: AtomVariant = {
   },
 };
 
+// ── 핵심 붕괴 계열 후보 (heavy impact 변종 — 게임 미적용) ──
+// coreCollapse 기준으로 캐릭터 분화: 깊은 저음 강조 / 돌 깨짐 / 멀리서 / 결정 산산조각
+
+// 1. 깊은 폭발 — sub 강조, click 없음, 더 묵직
+export const deepBoom: AtomVariant = {
+  id: 'impact-deep-boom',
+  label: '핵심 붕괴 - 깊은 폭발',
+  description: 'sub 75→22Hz longer release + 갈색 lp 400Hz, 클릭 없음 — 가장 묵직한 저음',
+  kind: 'hit',
+  play() {
+    const subStart = 75 * (0.92 + Math.random() * 0.16);
+    const subEnd = 22 * (0.92 + Math.random() * 0.16);
+    const sub = playOsc({
+      type: 'sine', freq: subStart, freqEnd: subEnd,
+      env: { attack: 0.003, decay: 0.06, sustain: 0.5, hold: 0.15, release: 0.6, peak: 0.95 },
+    });
+    const rumble = playNoise({
+      type: 'brown', duration: 0.6,
+      env: { attack: 0.003, decay: 0.08, sustain: 0.4, hold: 0.1, release: 0.45, peak: 0.6 },
+      filter: { type: 'lowpass', freq: 400, q: 0.7 },
+    });
+    return group([sub, rumble]);
+  },
+};
+
+// 2. 천둥 굴러가는 듯 — sub 슬라이드 + 노이즈 필터 sweep으로 굴러가는 느낌
+export const rollingBoom: AtomVariant = {
+  id: 'impact-rolling-boom',
+  label: '핵심 붕괴 - 천둥 롤',
+  description: 'sub 60→25Hz + 갈색 노이즈 필터 sweep 200→500Hz — 천둥 굴러가는 묵직한 boom',
+  kind: 'hit',
+  play() {
+    const subStart = 60 * (0.92 + Math.random() * 0.16);
+    const subEnd = 25 * (0.92 + Math.random() * 0.16);
+    const sub = playOsc({
+      type: 'sine', freq: subStart, freqEnd: subEnd,
+      env: { attack: 0.005, decay: 0.06, sustain: 0.5, hold: 0.18, release: 0.55, peak: 0.85 },
+    });
+    const roll = playNoise({
+      type: 'brown', duration: 0.7,
+      env: { attack: 0.01, decay: 0.08, sustain: 0.4, hold: 0.15, release: 0.5, peak: 0.55 },
+      filter: { type: 'lowpass', freq: 200, q: 0.7, freqEnd: 500 },
+    });
+    return group([sub, roll]);
+  },
+};
+
+
+// ── 사용자 보존 (지속형 sub 럼블 후보 — 게임 미적용) ──
+// 130Hz octave 제거 + 50Hz sub 추가 + brown lp 180→120Hz로 더 어둡게
+export const deepHum: AtomVariant = {
+  id: 'dark-deep-hum',
+  label: '딥 험 (Deep Hum)',
+  description: '50Hz sub + 65Hz fundamental + 브라운 lp 120Hz — 부드러운 저역 럼블, 130Hz octave 제거로 더 따뜻함',
+  kind: 'hit',
+  play() {
+    const sub = playOsc({
+      type: 'sine', freq: 50,
+      env: { attack: 0.2, decay: 0.05, sustain: 0.5, hold: 0.7, release: 0.3, peak: 0.42 },
+    });
+    const fund = playOsc({
+      type: 'sine', freq: 65,
+      env: { attack: 0.2, decay: 0.05, sustain: 0.55, hold: 0.7, release: 0.3, peak: 0.5 },
+    });
+    const body = playNoise({
+      type: 'brown', duration: 1.2,
+      env: { attack: 0.22, decay: 0.05, sustain: 0.32, hold: 0.65, release: 0.3, peak: 0.3 },
+      filter: { type: 'lowpass', freq: 120, q: 1 },
+    });
+    return group([sub, fund, body]);
+  },
+};
+
 export const ATOM_VARIANTS: AtomVariant[] = [
   // hit family
   plasmaZap, fusionPop, coreCollapse,
   orbitalResonance, gravitonThud, gammaPulse, chainReaction,
   // kill family
   atomicDecay, isotopeWarp, neutrinoShimmer,
+  // 보존 (지속형 후보)
+  deepHum,
+  // 핵심 붕괴 계열 (보존: deepBoom, rollingBoom)
+  deepBoom, rollingBoom,
 ];
