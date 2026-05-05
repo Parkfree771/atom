@@ -16,3 +16,44 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
 }
+
+/* 세로 모드 회전 안내 — 가로 모드에서는 자동 스케일링으로 모든 크기 지원 */
+.size-warning {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: #0b0f17;
+  color: #e7eaf0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  gap: 16px;
+}
+.size-warning .icon { font-size: 56px; animation: rotate-hint 2s ease-in-out infinite; }
+.size-warning h1 { font-size: 18px; font-weight: 700; margin: 0; }
+.size-warning p { font-size: 13px; color: #94A3B8; margin: 0; max-width: 360px; line-height: 1.6; }
+
+@keyframes rotate-hint {
+  0%, 50% { transform: rotate(0deg); }
+  60% { transform: rotate(-90deg); }
+  100% { transform: rotate(-90deg); }
+}
+
+/* 세로 모드일 때만 안내 표시 (가로 모드는 자동 스케일링) */
+@media (orientation: portrait) {
+  .size-warning { display: flex; }
+  .app-root { display: none; }
+}
+
+/* 사용자 동작 감소 선호 시 transition/animation 제거 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

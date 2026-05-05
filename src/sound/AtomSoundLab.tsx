@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { unlockAudio, stopAll, setMasterVolume } from './context';
+import { getSavedVolume } from '../storage';
 import { ATOM_VARIANTS, type AtomVariant } from './atomVariants';
 
 interface Props {
@@ -8,13 +9,19 @@ interface Props {
 }
 
 export default function AtomSoundLab({ onContinue }: Props) {
-  const [volume, setVolume] = useState(0.23);
+  const [volume, setVolume] = useState(() => getSavedVolume());
   const [filter, setFilter] = useState<'all' | 'hit' | 'kill'>('all');
   const [lastPlayed, setLastPlayed] = useState<string | null>(null);
   const flashTimer = useRef<number | null>(null);
+  const rapidTimers = useRef<number[]>([]);
 
   useEffect(() => {
     void unlockAudio();
+    return () => {
+      if (flashTimer.current) window.clearTimeout(flashTimer.current);
+      for (const id of rapidTimers.current) window.clearTimeout(id);
+      rapidTimers.current = [];
+    };
   }, []);
 
   useEffect(() => {
@@ -37,7 +44,8 @@ export default function AtomSoundLab({ onContinue }: Props) {
     void unlockAudio();
     flash(v.id);
     for (let i = 0; i < count; i++) {
-      window.setTimeout(() => v.play(), i * gapMs);
+      const id = window.setTimeout(() => v.play(), i * gapMs);
+      rapidTimers.current.push(id);
     }
   }
 

@@ -5,7 +5,8 @@
  *   - playFieldDrop → 물방울 blup (water / earth / dark / 물+전기 — 장판형 펄스 stagger)
  *   - playHitBeam   → isotope-warp (light — single beam shot)
  *   - playHitChain  → isotope-warp staggered (electric — chain hits, 불+전기/빛+전기 c2)
- *   - playImpact    → core-collapse (묵직한 폭발 임팩트 — 물+불/빛+암흑/흙+암흑/불+암흑 c2)
+ *   - playImpact    → core-collapse (묵직한 폭발 임팩트 — 물+불/빛+암흑/불+암흑 c2 단발 폭발)
+ *   - playMeteorImpact → 짧은 운석 착탄 (~250ms — 유성우 콤보 4종 + 흙/불 ult, 100ms 간격 안전)
  *   - playGravitonThud → graviton-thud (마그마 균열 흙+불 3링 순차 폭발, 링당 1회)
  *   - playAtomicDecay → atomic-decay (빛 기반 c2 빔 발사 — 물+빛/불+빛/흙+빛, 발사당 1회)
  *   - playIsotopeWarp → isotope-warp 1회 (지속 발사 c3 hit — 사구아로/무지개 장마, 80ms throttle)
@@ -32,7 +33,7 @@
  *
  * playHit is a generic fallback (used by combo effects without explicit mapping).
  */
-import { unlockAudio } from './context';
+import { unlockAudio, canAllocateBurst } from './context';
 import type { VoiceHandle } from './primitives';
 import { playNoise, playOsc, group } from './primitives';
 import { isotopeWarp, coreCollapse, gravitonThud, atomicDecay, deepBoom, rollingBoom } from './atomVariants';
@@ -40,6 +41,19 @@ import { isotopeWarp, coreCollapse, gravitonThud, atomicDecay, deepBoom, rolling
 const HIT_THROTTLE_MS = 25;
 
 let lastHit = 0;
+
+// Per-function entry throttle. Prevents the same sound from firing twice within
+// `ms` — protects against multi-combo overlap where 3+ effects trigger the same
+// SFX in the same frame. Single-combo behavior unchanged.
+const lastFiredAt = new Map<string, number>();
+function shouldFire(key: string, ms: number): boolean {
+  if (!canAllocateBurst()) return false;
+  const now = performance.now();
+  const last = lastFiredAt.get(key) ?? 0;
+  if (now - last < ms) return false;
+  lastFiredAt.set(key, now);
+  return true;
+}
 
 // Cap per-call to prevent runaway audio density. Visuals + limiter cover the rest.
 const MAX_BEAM_SOUNDS = 6;
@@ -68,32 +82,77 @@ function wetBlupSound(): void {
 
 export function playFieldDrop(count = 1, gapMs = 70): void {
   if (count <= 0) return;
+  if (!shouldFire('fieldDrop', 20)) return;
   void unlockAudio();
   const n = Math.min(count, MAX_FIELD_SOUNDS);
   for (let i = 0; i < n; i++) {
-    window.setTimeout(wetBlupSound, i * gapMs);
+    window.setTimeout(() => { if (canAllocateBurst()) wetBlupSound(); }, i * gapMs);
   }
 }
 
 export function playHitBeam(count = 1, gapMs = 60): void {
   if (count <= 0) return;
+  if (!shouldFire('hitBeam', 20)) return;
   void unlockAudio();
   const n = Math.min(count, MAX_BEAM_SOUNDS);
   for (let i = 0; i < n; i++) {
-    window.setTimeout(() => isotopeWarp.play(), i * gapMs);
+    window.setTimeout(() => { if (canAllocateBurst()) isotopeWarp.play(); }, i * gapMs);
   }
 }
 
-// 묵직한 폭발/임팩트 — c2 폭발형 콤보용 (물+불, 빛+암흑, 흙+암흑, 불+암흑).
+// 묵직한 폭발/임팩트 — c2 폭발형 콤보용 (물+불, 빛+암흑, 빛+암흑 등 단발 큰 폭발).
 // coreCollapse 자체에 ±8% freq 지터 내장돼 있어 2~3개 stacking 안전.
 export function playImpact(): void {
+  if (!shouldFire('impact', 30)) return;
   void unlockAudio();
   coreCollapse.play();
+}
+
+// 유성우 임팩트 — 묵직한 "쿠웅" 운석 착탄음 (~400~550ms total).
+// 메커니즘 핵심: 시각 임팩트 프레임에 즉시 발화. setTimeout 사용 금지(비결정적 지연이
+// 다중 콤보 동시 활성 시 사운드를 무작위로 어긋나게 만들어 "다다다다" 됨).
+// 변동 폭은 freq/peak/release 자체에서만 — 타이밍은 절대 흔들지 않음.
+export function playMeteorImpact(): void {
+  if (!canAllocateBurst()) return;
+  void unlockAudio();
+  // Sub thump — 깊고 길게 (운석 무게감의 핵심).
+  const subFreq = 48 + Math.random() * 28;        // 48~76Hz
+  const subEnd = 16 + Math.random() * 14;         // 16~30Hz
+  const subPeak = 0.65 + Math.random() * 0.2;     // 0.65~0.85
+  const subRelease = 0.25 + Math.random() * 0.2;  // 0.25~0.45
+  playOsc({
+    type: 'sine', freq: subFreq, freqEnd: subEnd,
+    env: { attack: 0.002, decay: 0.05, sustain: 0.4, release: subRelease, peak: subPeak },
+  });
+  // Mid body — 운석 본체 충돌 텍스처
+  const bodyFreq = 110 + Math.random() * 80;      // 110~190Hz
+  const bodyPeak = 0.28 + Math.random() * 0.12;   // 0.28~0.4
+  playOsc({
+    type: 'triangle', freq: bodyFreq, freqEnd: bodyFreq * 0.5,
+    env: { attack: 0.003, decay: 0.05, sustain: 0.25, release: 0.15 + Math.random() * 0.1, peak: bodyPeak },
+  });
+  // Crack — 약하게 (지배적이면 "다다다" 됨). 클릭 흔적만 남김.
+  const crackFreq = 1200 + Math.random() * 1000;  // 1200~2200Hz
+  const crackPeak = 0.10 + Math.random() * 0.08;  // 0.10~0.18
+  playNoise({
+    type: 'white', duration: 0.03,
+    env: { attack: 0.001, decay: 0.006, sustain: 0, release: 0.022, peak: crackPeak },
+    filter: { type: 'bandpass', freq: crackFreq, q: 1.5 + Math.random() * 0.8 },
+  });
+  // 흙 scatter — 흙 부서지는 텍스처
+  const scatterPeak = 0.28 + Math.random() * 0.18; // 0.28~0.46
+  const scatterRel = 0.18 + Math.random() * 0.15;  // 0.18~0.33
+  playNoise({
+    type: 'brown', duration: 0.3,
+    env: { attack: 0.004, decay: 0.05, sustain: 0.32, release: scatterRel, peak: scatterPeak },
+    filter: { type: 'lowpass', freq: 450 + Math.random() * 400, q: 0.8 },
+  });
 }
 
 // 중력자 타격 — 마그마 균열(흙+불) 3링 순차 폭발용. 링당 1회 호출.
 // gravitonThud 자체에 freq 지터 내장 — 같은 프레임에 2~3링 동시 polish 안전.
 export function playGravitonThud(): void {
+  if (!shouldFire('gravitonThud', 30)) return;
   void unlockAudio();
   gravitonThud.play();
 }
@@ -101,6 +160,7 @@ export function playGravitonThud(): void {
 // 원자 붕괴 — 빛 기반 c2 빔 콤보(물+빛/불+빛/흙+빛) 발사 시. 빔 1발마다 1회 (7발 동시도 1회).
 // 차분한 하강 사인 + 핑크 잔향 — 빔 임팩트 마무리감.
 export function playAtomicDecay(): void {
+  if (!shouldFire('atomicDecay', 30)) return;
   void unlockAudio();
   atomicDecay.play();
 }
@@ -108,6 +168,7 @@ export function playAtomicDecay(): void {
 // 깊은 폭발 — c3 사이클형 burst용 (개기일식 CORONA_BURST, 빅뱅 EXPLODE, 천지섬광 FLASH).
 // deepBoom variant: sub 75→22Hz longer + 갈색 lp 400Hz, 클릭 없음, 큰 폭발 묵직함.
 export function playDeepBoom(): void {
+  if (!shouldFire('deepBoom', 50)) return;
   void unlockAudio();
   deepBoom.play();
 }
@@ -115,6 +176,7 @@ export function playDeepBoom(): void {
 // 천둥 롤 — 천지섬광 FLASH에 deepBoom과 layer로 함께 재생.
 // rollingBoom: sub 60→25Hz + 노이즈 필터 sweep 200→500Hz, 천둥 굴러가는 듯한 trail.
 export function playRollingBoom(): void {
+  if (!shouldFire('rollingBoom', 50)) return;
   void unlockAudio();
   rollingBoom.play();
 }
@@ -122,6 +184,7 @@ export function playRollingBoom(): void {
 // 심연균열 BURST — sub 70→25Hz + 1.5kHz 화이트 crack + 갈색 lp 500Hz, 콰앙 + 쩍 균열.
 // 주기적(~2.17초)으로 발동, freq 지터로 stacking 안전.
 export function playRiftBurst(): void {
+  if (!shouldFire('riftBurst', 30)) return;
   void unlockAudio();
   playOsc({
     type: 'sine', freq: 70 * (0.92 + Math.random() * 0.16), freqEnd: 25,
@@ -141,6 +204,7 @@ export function playRiftBurst(): void {
 
 // 자철 다이나모 RECONNECT — 250Hz 사각 + 80Hz sub + 갈색 lp 350Hz, 펀치한 산업용 금속 박수.
 export function playDynamoClap(): void {
+  if (!shouldFire('dynamoClap', 30)) return;
   void unlockAudio();
   playOsc({
     type: 'square', freq: 250 * (0.95 + Math.random() * 0.1),
@@ -163,6 +227,7 @@ export function playDynamoClap(): void {
 const ISOTOPE_HIT_THROTTLE_MS = 50;
 let lastIsotopeHit = 0;
 export function playIsotopeWarp(): void {
+  if (!canAllocateBurst()) return;
   const now = performance.now();
   if (now - lastIsotopeHit < ISOTOPE_HIT_THROTTLE_MS) return;
   lastIsotopeHit = now;
@@ -174,10 +239,11 @@ export function playIsotopeWarp(): void {
 // Cap=10 = tier-1 max chain (covers c2 multi-chain combos that can produce 20+ hits).
 export function playHitChain(count: number, gapMs = 80): void {
   if (count <= 0) return;
+  if (!shouldFire('hitChain', 20)) return;
   void unlockAudio();
   const n = Math.min(count, MAX_CHAIN_SOUNDS);
   for (let i = 0; i < n; i++) {
-    window.setTimeout(() => isotopeWarp.play(), i * gapMs);
+    window.setTimeout(() => { if (canAllocateBurst()) isotopeWarp.play(); }, i * gapMs);
   }
 }
 
@@ -222,6 +288,7 @@ export function setMireSwampActive(active: boolean): void {
     const sub = playOsc({
       type: 'sine', freq: 50 * (0.95 + Math.random() * 0.1),
       env: { attack: 0.22, decay: 0.05, sustain: 0.55, hold: 9999, release: 0.35, peak: 0.5 },
+      loop: true,
     });
     const body = playNoise({
       type: 'brown', duration: 3.0, loop: true,
@@ -237,6 +304,7 @@ export function setMireSwampActive(active: boolean): void {
 
 // 감전 퀵샌드 DoT 펄스 zap — 톱니 180Hz 짧은 전기 zap (24f 주기로 호출).
 export function playMireZap(): void {
+  if (!shouldFire('mireZap', 30)) return;
   void unlockAudio();
   playOsc({
     type: 'sawtooth', freq: 180,
@@ -254,10 +322,12 @@ export function setGravityWellActive(active: boolean): void {
     const sub = playOsc({
       type: 'sine', freq: 45 * (0.95 + Math.random() * 0.1),
       env: { attack: 0.22, decay: 0.05, sustain: 0.6, hold: 9999, release: 0.35, peak: 0.55 },
+      loop: true,
     });
     const oct = playOsc({
       type: 'sine', freq: 60,
       env: { attack: 0.22, decay: 0.05, sustain: 0.4, hold: 9999, release: 0.35, peak: 0.3 },
+      loop: true,
     });
     const body = playNoise({
       type: 'brown', duration: 3.0, loop: true,
@@ -281,6 +351,7 @@ export function setTornadoHowlActive(active: boolean): void {
     const sub = playOsc({
       type: 'sine', freq: 50 * (0.95 + Math.random() * 0.1),
       env: { attack: 0.22, decay: 0.05, sustain: 0.5, hold: 9999, release: 0.35, peak: 0.45 },
+      loop: true,
     });
     const wind = playNoise({
       type: 'brown', duration: 3.0, loop: true,
@@ -304,10 +375,12 @@ export function setAbyssShimmerActive(active: boolean): void {
     const a = playOsc({
       type: 'sine', freq: 55,
       env: { attack: 0.22, decay: 0.05, sustain: 0.55, hold: 9999, release: 0.35, peak: 0.48 },
+      loop: true,
     });
     const b = playOsc({
       type: 'sine', freq: 58,
       env: { attack: 0.22, decay: 0.05, sustain: 0.45, hold: 9999, release: 0.35, peak: 0.36 },
+      loop: true,
     });
     const body = playNoise({
       type: 'brown', duration: 3.0, loop: true,
@@ -331,10 +404,12 @@ export function setDeepHumActive(active: boolean): void {
     const sub = playOsc({
       type: 'sine', freq: 50,
       env: { attack: 0.22, decay: 0.05, sustain: 0.5, hold: 9999, release: 0.35, peak: 0.42 },
+      loop: true,
     });
     const fund = playOsc({
       type: 'sine', freq: 65,
       env: { attack: 0.22, decay: 0.05, sustain: 0.55, hold: 9999, release: 0.35, peak: 0.5 },
+      loop: true,
     });
     const body = playNoise({
       type: 'brown', duration: 3.0, loop: true,
@@ -367,6 +442,7 @@ function impact(pitch: number): { stop: (at?: number) => void } {
 }
 
 export function playHit(): void {
+  if (!canAllocateBurst()) return;
   const now = performance.now();
   if (now - lastHit < HIT_THROTTLE_MS) return;
   lastHit = now;

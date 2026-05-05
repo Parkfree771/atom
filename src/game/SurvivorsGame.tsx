@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { GameEngine } from './engine';
 import { LevelEvent, LevelEventResolution, SkillId, PlayerState } from './types';
 import { LevelUpOverlay } from './levelup/LevelUpOverlay';
-import { unlockAudio } from '../sound/context';
+import { unlockAudio, getAudioContext } from '../sound/context';
+import { getHighScore } from '../storage';
 
 // ── 라이트 테마 토큰 ──
 const C = {
@@ -21,6 +22,12 @@ const CANVAS_W = 960;
 const CANVAS_H = 540;
 const SIDEBAR_W = 220;
 
+// Total layout footprint: 220 + 14 + 960 + 14 + 220 = 1428 wide, ~540 tall.
+// Below this size we scale the whole layout uniformly so it stays playable on phone landscape.
+const LAYOUT_W = 1428;
+const LAYOUT_H = 540;
+const LAYOUT_PADDING = 24;
+
 const SKILL_META: { id: SkillId; key: string; symbol: string; name: string; color: string }[] = [
   { id: 'water_tidal',     key: '1', symbol: '💧', name: '대해일',   color: '#2563eb' },
   { id: 'fire_inferno',    key: '2', symbol: '🔥', name: '지옥염',   color: '#dc2626' },
@@ -34,18 +41,50 @@ export default function SurvivorsGame() {
   const containerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
   const [pendingEvent, setPendingEvent] = useState<LevelEvent | null>(null);
+  const [paused, setPaused] = useState(true);
+  const [hasStarted, setHasStarted] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const [scale, setScale] = useState(1);
+
+  // Auto-scale the whole layout to fit any landscape viewport (desktop + phone landscape).
+  useEffect(() => {
+    const update = () => {
+      const sx = (window.innerWidth - LAYOUT_PADDING) / LAYOUT_W;
+      const sy = (window.innerHeight - LAYOUT_PADDING) / LAYOUT_H;
+      setScale(Math.min(1, sx, sy));
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
+    };
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
     if (engineRef.current) return;
 
+    // Dev mode opens a hidden test panel + cheats (skill unlock, weapon fill, boss spawn).
+    // Activated by ?test=1 — kept available in production for the developer's own use.
     const devMode = new URLSearchParams(window.location.search).get('test') === '1';
 
-    const engine = new GameEngine({ devMode });
+    let engine: GameEngine;
+    try {
+      engine = new GameEngine({ devMode });
+      engine.init(containerRef.current);
+    } catch (err) {
+      if (import.meta.env.DEV) console.error('[engine init failed]', err);
+      setInitError('이 브라우저에서 게임을 실행할 수 없습니다 (WebGL 미지원).');
+      return;
+    }
     engineRef.current = engine;
     engine.onLevelEvent = (event) => setPendingEvent(event);
-    engine.init(containerRef.current);
+    engine.onUserPauseChange = (p) => setPaused(p);
+    // Start paused — the start screen overlay will resume the game on first click.
+    engine.setUserPaused(true);
 
     // Unlock Web Audio on first user gesture (autoplay policy)
     const unlock = () => {
@@ -55,6 +94,31 @@ export default function SurvivorsGame() {
     };
     window.addEventListener('keydown', unlock);
     window.addEventListener('pointerdown', unlock);
+
+    // Esc key — toggle user pause (ignored during level-up, since `state.paused` already freezes the loop)
+    const onPauseKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        const eng = engineRef.current;
+        if (!eng || eng.state.gameOver || eng.state.pendingLevelEvent) return;
+        eng.setUserPaused(!eng.isUserPaused());
+      }
+    };
+    window.addEventListener('keydown', onPauseKey);
+
+    // Tab/window focus loss — pause game and suspend audio. Don't auto-resume on focus
+    // (player must press Esc) so the game never starts moving while the player isn't watching.
+    const onBlur = () => {
+      const eng = engineRef.current;
+      if (eng && !eng.state.gameOver && !eng.state.pendingLevelEvent) {
+        eng.setUserPaused(true);
+      }
+      try { void getAudioContext().suspend(); } catch { /* not yet created */ }
+    };
+    const onFocus = () => {
+      try { void getAudioContext().resume(); } catch { /* not yet created */ }
+    };
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
 
     // HUD refresh — ~30Hz
     let raf = 0;
@@ -69,6 +133,9 @@ export default function SurvivorsGame() {
       cancelAnimationFrame(raf);
       window.removeEventListener('keydown', unlock);
       window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', onPauseKey);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
       engine.destroy();
       engineRef.current = null;
     };
@@ -96,17 +163,24 @@ export default function SurvivorsGame() {
       display: 'flex',
       justifyContent: 'center',
       alignItems: 'center',
-      padding: '20px 16px',
+      padding: '12px',
       boxSizing: 'border-box',
       fontFamily: 'Inter, "Segoe UI", system-ui, sans-serif',
+      overflow: 'hidden',
     }}>
       <div style={{
         display: 'flex',
         gap: 14,
         alignItems: 'stretch',
+        transform: `scale(${scale})`,
+        transformOrigin: 'center center',
+        transition: 'transform 0.15s ease-out',
       }}>
         {/* ── 좌측 사이드바: 스킬 콘솔 (캔버스 높이와 매칭) ── */}
-        <SkillSidebar player={player} />
+        <SkillSidebar
+          player={player}
+          onFire={(id) => engineRef.current?.fireSkill(id)}
+        />
 
         {/* ── 중앙: 게임 캔버스 ── */}
         <div
@@ -123,6 +197,18 @@ export default function SurvivorsGame() {
           }}
         >
           <LevelUpOverlay event={pendingEvent} onResolve={handleResolve} />
+          {!hasStarted && !initError && (
+            <StartOverlay
+              onStart={() => {
+                setHasStarted(true);
+                engineRef.current?.setUserPaused(false);
+              }}
+            />
+          )}
+          {hasStarted && paused && !pendingEvent && (
+            <PauseOverlay onResume={() => engineRef.current?.setUserPaused(false)} />
+          )}
+          {initError && <InitErrorOverlay message={initError} />}
         </div>
 
         {/* ── 우측 사이드바 ── */}
@@ -141,7 +227,7 @@ export default function SurvivorsGame() {
 // ═══════════════════════════════════════════════════════════
 //  Skill Sidebar (left, vertical, matches canvas height)
 // ═══════════════════════════════════════════════════════════
-function SkillSidebar({ player }: { player: PlayerState | null }) {
+function SkillSidebar({ player, onFire }: { player: PlayerState | null; onFire: (id: SkillId) => void }) {
   // 헤더 36px + 6 슬롯 균등 분배 + padding
   const HEADER_H = 32;
   const PADDING = 10;
@@ -192,6 +278,7 @@ function SkillSidebar({ player }: { player: PlayerState | null }) {
             unlocked={unlocked}
             cooldownRatio={ratio}
             secsLeft={secsLeft}
+            onFire={() => onFire(meta.id)}
           />
         );
       })}
@@ -199,12 +286,13 @@ function SkillSidebar({ player }: { player: PlayerState | null }) {
   );
 }
 
-function SkillRow({ meta, height, unlocked, cooldownRatio, secsLeft }: {
+function SkillRow({ meta, height, unlocked, cooldownRatio, secsLeft, onFire }: {
   meta: (typeof SKILL_META)[number];
   height: number;
   unlocked: boolean;
   cooldownRatio: number;
   secsLeft: number;
+  onFire: () => void;
 }) {
   const cooling = unlocked && cooldownRatio > 0;
   const ready = unlocked && !cooling;
@@ -214,7 +302,12 @@ function SkillRow({ meta, height, unlocked, cooldownRatio, secsLeft }: {
     : 'none';
 
   return (
-    <div style={{
+    <button
+      type="button"
+      onClick={onFire}
+      disabled={!ready}
+      aria-label={`${meta.name} 스킬 (${meta.key}번 키)`}
+      style={{
       height,
       display: 'flex',
       alignItems: 'center',
@@ -223,7 +316,13 @@ function SkillRow({ meta, height, unlocked, cooldownRatio, secsLeft }: {
       borderRadius: 8,
       background: unlocked ? `${meta.color}0a` : 'transparent',
       border: `1px solid ${ready ? meta.color : unlocked ? `${meta.color}55` : C.panelBorder}`,
-      transition: 'border-color 0.15s',
+      transition: 'border-color 0.15s, transform 0.05s',
+      cursor: ready ? 'pointer' : 'default',
+      width: '100%',
+      font: 'inherit',
+      color: 'inherit',
+      textAlign: 'left',
+      WebkitTapHighlightColor: 'transparent',
     }}>
       {/* 키 캡 */}
       <div style={{
@@ -306,7 +405,7 @@ function SkillRow({ meta, height, unlocked, cooldownRatio, secsLeft }: {
           {unlocked ? meta.name : 'LOCKED'}
         </div>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -339,8 +438,8 @@ function Sidebar({ score, kills, level, wave, timeStr }: {
 
       <PanelCard title="CONTROLS">
         <ControlRow keys="WASD" label="이동" />
-        <ControlRow keys="1 2 3" label="무기 슬롯" />
-        <ControlRow keys="Q W E R T Y" label="스킬" />
+        <ControlRow keys="1 - 6" label="스킬" />
+        <ControlRow keys="Esc" label="일시정지" />
       </PanelCard>
     </aside>
   );
@@ -390,6 +489,155 @@ function StatRow({ label, value }: { label: string; value: number | string }) {
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '4px 0' }}>
       <span style={{ fontSize: 11, color: C.textMuted, letterSpacing: 1.5, fontWeight: 700 }}>{label}</span>
       <span style={{ fontSize: 20, fontWeight: 800, color: C.textPri }}>{value}</span>
+    </div>
+  );
+}
+
+function StartOverlay({ onStart }: { onStart: () => void }) {
+  const [highScore] = useState(() => getHighScore());
+
+  return (
+    <div style={{
+      position: 'absolute',
+      inset: 0,
+      background: 'linear-gradient(180deg, #0F172A 0%, #1E293B 100%)',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 18,
+      padding: 24,
+      textAlign: 'center',
+      zIndex: 60,
+    }}>
+      <div style={{ fontSize: 56 }}>⚛</div>
+      <div style={{
+        fontSize: 38,
+        fontWeight: 800,
+        color: '#FFFFFF',
+        letterSpacing: 6,
+      }}>
+        ATOM
+      </div>
+      <div style={{
+        fontSize: 13,
+        color: '#94A3B8',
+        letterSpacing: 2,
+        marginTop: -8,
+      }}>
+        ELEMENT SURVIVORS
+      </div>
+      <div style={{
+        fontSize: 12,
+        color: '#CBD5E1',
+        maxWidth: 380,
+        lineHeight: 1.6,
+        marginTop: 16,
+      }}>
+        WASD로 이동, 1~6 키로 스킬 발동.<br />
+        원소를 모아 무기를 조합하고 끝없이 몰려오는 적을 처치하세요.
+      </div>
+      {highScore > 0 && (
+        <div style={{
+          fontSize: 12,
+          color: '#FBBF24',
+          letterSpacing: 1,
+          marginTop: 4,
+        }}>
+          최고 점수: {highScore.toLocaleString()}
+        </div>
+      )}
+      <button
+        onClick={onStart}
+        style={{
+          marginTop: 12,
+          padding: '12px 36px',
+          fontSize: 16,
+          fontWeight: 800,
+          color: '#0F172A',
+          background: '#FFFFFF',
+          border: 'none',
+          borderRadius: 10,
+          cursor: 'pointer',
+          letterSpacing: 2,
+          boxShadow: '0 4px 16px rgba(255, 255, 255, 0.2)',
+        }}
+      >
+        START
+      </button>
+      <div style={{ fontSize: 10, color: '#64748B', marginTop: 8, letterSpacing: 1 }}>
+        Esc — 일시정지
+      </div>
+    </div>
+  );
+}
+
+function InitErrorOverlay({ message }: { message: string }) {
+  return (
+    <div style={{
+      position: 'absolute',
+      inset: 0,
+      background: '#0F172A',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 16,
+      padding: 24,
+      textAlign: 'center',
+    }}>
+      <div style={{ fontSize: 36 }}>⚛</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: '#F1F5F9' }}>
+        {message}
+      </div>
+      <div style={{ fontSize: 12, color: '#94A3B8' }}>
+        최신 Chrome, Edge, Safari, Firefox 브라우저를 권장합니다.
+      </div>
+    </div>
+  );
+}
+
+function PauseOverlay({ onResume }: { onResume: () => void }) {
+  return (
+    <div style={{
+      position: 'absolute',
+      inset: 0,
+      background: 'rgba(15, 23, 42, 0.55)',
+      backdropFilter: 'blur(2px)',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 18,
+      zIndex: 50,
+    }}>
+      <div style={{
+        fontSize: 36,
+        fontWeight: 800,
+        color: '#FFFFFF',
+        letterSpacing: 4,
+      }}>
+        일시정지
+      </div>
+      <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)', letterSpacing: 1 }}>
+        Esc 또는 아래 버튼으로 재개
+      </div>
+      <button
+        onClick={onResume}
+        style={{
+          padding: '10px 28px',
+          fontSize: 14,
+          fontWeight: 700,
+          color: '#0F172A',
+          background: '#FFFFFF',
+          border: 'none',
+          borderRadius: 8,
+          cursor: 'pointer',
+          letterSpacing: 1,
+        }}
+      >
+        재개
+      </button>
     </div>
   );
 }

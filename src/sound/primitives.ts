@@ -124,7 +124,7 @@ export function playNoise(opts: NoiseVoiceOpts): VoiceHandle {
   const end = applyEnvelope(gain, t0, opts.env);
   src.start(t0);
   src.stop(end + 0.05);
-  trackNode(src);
+  trackNode(src, { loop: opts.loop ?? false });
 
   return {
     source: src,
@@ -145,6 +145,7 @@ export interface OscVoiceOpts {
   env: EnvelopeOpts;
   filter?: { type: BiquadFilterType; freq: number; q?: number };
   output?: AudioNode;
+  loop?: boolean; // tracking-only: tells voice budget this is a sustained drone, not a burst
 }
 
 export function playOsc(opts: OscVoiceOpts): VoiceHandle {
@@ -176,7 +177,7 @@ export function playOsc(opts: OscVoiceOpts): VoiceHandle {
   const end = applyEnvelope(gain, t0, opts.env);
   osc.start(t0);
   osc.stop(end + 0.05);
-  trackNode(osc);
+  trackNode(osc, { loop: opts.loop ?? false });
 
   return {
     source: osc,

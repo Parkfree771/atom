@@ -1,5 +1,6 @@
 import * as PIXI from 'pixi.js';
 import { GameState, ElementType, ELEMENT_COLORS, CANVAS_W, CANVAS_H } from './types';
+import { saveHighScoreIfBetter } from '../storage';
 
 // 인-캔버스 UI는 게임 진행에 필요한 overlay만 유지:
 //   - waveAnnounce (Wave 시작 플래시)
@@ -412,19 +413,20 @@ export function showGameOver(
   bg.drawRect(0, 0, CANVAS_W, CANVAS_H);
   bg.endFill();
 
+  const PANEL_H = 300;
   const panel = new PIXI.Graphics();
   panel.beginFill(0x0b1020, 0.95);
-  panel.drawRoundedRect(0, 0, 360, 280, 14);
+  panel.drawRoundedRect(0, 0, 360, PANEL_H, 14);
   panel.endFill();
   panel.lineStyle(1, 0x334155, 0.75);
-  panel.drawRoundedRect(0, 0, 360, 280, 14);
+  panel.drawRoundedRect(0, 0, 360, PANEL_H, 14);
   panel.x = (CANVAS_W - 360) / 2;
-  panel.y = (CANVAS_H - 280) / 2;
+  panel.y = (CANVAS_H - PANEL_H) / 2;
 
   const gameOverText = new PIXI.Text('GAME OVER', textStyle(36, '#F87171', 'bold', 4));
   gameOverText.anchor.set(0.5);
   gameOverText.x = CANVAS_W / 2;
-  gameOverText.y = (CANVAS_H - 280) / 2 + 50;
+  gameOverText.y = (CANVAS_H - PANEL_H) / 2 + 50;
 
   const mins = Math.floor(state.frameCount / 60 / 60);
   const secs = Math.floor(state.frameCount / 60) % 60;
@@ -435,13 +437,16 @@ export function showGameOver(
     .map(s => s.weapon!.name)
     .join(', ');
 
+  const { best, isNew } = saveHighScoreIfBetter(state.player.score);
+  const bestLine = isNew ? `최고 점수: ${best}  ★ NEW` : `최고 점수: ${best}`;
+
   const statsText = new PIXI.Text(
-    `킬 수: ${state.player.kills}\n점수: ${state.player.score}\nWave: ${state.wave}\n시간: ${mins}:${secStr}\n무기: ${weaponCount > 0 ? weaponNames : '없음'}`,
+    `킬 수: ${state.player.kills}\n점수: ${state.player.score}\n${bestLine}\nWave: ${state.wave}\n시간: ${mins}:${secStr}\n무기: ${weaponCount > 0 ? weaponNames : '없음'}`,
     textStyle(14, '#F8FAFC')
   );
   statsText.anchor.set(0.5, 0);
   statsText.x = CANVAS_W / 2;
-  statsText.y = (CANVAS_H - 280) / 2 + 100;
+  statsText.y = (CANVAS_H - PANEL_H) / 2 + 90;
 
   const btnBg = new PIXI.Graphics();
   btnBg.beginFill(0x22d3ee, 0.2);
@@ -450,7 +455,7 @@ export function showGameOver(
   btnBg.lineStyle(2, 0x22d3ee, 0.9);
   btnBg.drawRoundedRect(0, 0, 180, 48, 10);
   btnBg.x = (CANVAS_W - 180) / 2;
-  btnBg.y = (CANVAS_H - 280) / 2 + 210;
+  btnBg.y = (CANVAS_H - PANEL_H) / 2 + 230;
   btnBg.eventMode = 'static';
   btnBg.cursor = 'pointer';
   btnBg.on('pointerdown', () => {
@@ -461,7 +466,7 @@ export function showGameOver(
   const btnText = new PIXI.Text('RESTART', textStyle(18, '#22D3EE', 'bold', 3));
   btnText.anchor.set(0.5);
   btnText.x = CANVAS_W / 2;
-  btnText.y = (CANVAS_H - 280) / 2 + 234;
+  btnText.y = (CANVAS_H - PANEL_H) / 2 + 254;
 
   overlay.container.addChild(bg, panel, gameOverText, statsText, btnBg, btnText);
 }

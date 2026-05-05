@@ -1,0 +1,18 @@
+{
+  "name": "Atom — Element Survivors",
+  "short_name": "Atom",
+  "description": "원소를 조합해 무기를 만들고 끝없이 몰려오는 적을 처치하는 1인용 로그라이크 서바이버즈.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0b0f17",
+  "theme_color": "#0b0f17",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

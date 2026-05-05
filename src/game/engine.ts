@@ -18,7 +18,7 @@ import {
 import { SpatialHash, checkProjectileEnemyCollisions, checkPlayerEnemyCollisions, checkWeaponEffectEnemyCollisions } from './collision';
 import { createParticlePool, updateParticles, spawnExplosionParticles, spawnHitParticles, spawnLevelUpParticles } from './particles';
 import { spawnWaveEnemies, getMaxEnemies } from './spawner';
-import { playHit, playHitChain, playHitBeam, playKill, playFieldDrop, playImpact, playGravitonThud, playAtomicDecay, playIsotopeWarp, playDeepBoom, playRollingBoom, playDynamoClap, playRiftBurst, playMireZap, startFireRoar, stopFireRoar, setDeepHumActive, setAbyssShimmerActive, setTornadoHowlActive, setGravityWellActive, setMireSwampActive } from '../sound/gameSounds';
+import { playHit, playHitChain, playHitBeam, playKill, playFieldDrop, playImpact, playMeteorImpact, playGravitonThud, playAtomicDecay, playIsotopeWarp, playDeepBoom, playRollingBoom, playDynamoClap, playRiftBurst, playMireZap, startFireRoar, stopFireRoar, setDeepHumActive, setAbyssShimmerActive, setTornadoHowlActive, setGravityWellActive, setMireSwampActive } from '../sound/gameSounds';
 import { getWeaponForElements, activateAllWeapons, updateWeaponEffects } from './weapons';
 import {
   createGameGraphics, drawGround, drawPlayer, createPlayerSprite, drawEnemies,
@@ -87,6 +87,19 @@ export class GameEngine {
   private isDark = false; // 항상 false — 게임은 화이트모드 고정
   private devMode: boolean;
   private devPanel!: DevPanel;
+  /** User-initiated pause (Esc key, window blur). Distinct from `state.paused` which is set during level-up. */
+  private userPaused = false;
+  onUserPauseChange?: (paused: boolean) => void;
+
+  isUserPaused(): boolean {
+    return this.userPaused;
+  }
+
+  setUserPaused(paused: boolean): void {
+    if (this.userPaused === paused) return;
+    this.userPaused = paused;
+    this.onUserPauseChange?.(paused);
+  }
   private _waterCooldown = 0;
   private _electricTimer = 0;
   /** 1단계 전기 / 빛+전기 체인 노드: enemyIdx + 마지막 안전 좌표. enemies 풀 재사용 방어. */
@@ -288,10 +301,9 @@ export class GameEngine {
     // - overlayLayer: 스크린 좌표 이펙트 (카메라 변환 안 받음)
     this.effectManager = new EffectManager(effectLayer, groundLayer, overlayLayer, this.app.renderer as PIXI.Renderer);
 
-    // uiContainer 참조 저장 — P 키로 런타임 dev 모드 활성화 시 패널 생성용
     this._uiContainerRef = uiContainer;
 
-    // Dev panel (?test=1 URL로 시작된 경우)
+    // Dev panel (?test=1 URL — production 빌드에서는 차단됨)
     if (this.devMode) {
       this.enableDevMode();
     }
@@ -299,10 +311,10 @@ export class GameEngine {
 
   private _uiContainerRef!: PIXI.Container;
 
-  /** URL/키 어느 쪽으로든 dev 모드 활성화 (idempotent) */
+  /** dev 모드 진입 시 패널/스킬 언락 적용 (idempotent). 무기 슬롯은 사용자가 직접 선택. */
   private enableDevMode() {
     this.devMode = true;
-    // 1) DEV 패널 생성 (이미 있으면 스킵)
+    // 1) DEV 패널 생성 (이미 있으면 스킵) — 패널 안에 "Fill All" 버튼은 남겨두어 수동 가능
     if (!this.devPanel) {
       this.devPanel = createDevPanel(
         this._uiContainerRef,
@@ -319,9 +331,9 @@ export class GameEngine {
       skills[key].unlocked = true;
       skills[key].cooldown = 0;
     }
-    // 3) 9슬롯 전부 채우기 (무기 콤보 전부 완성)
-    this.devFillAll();
-    console.info('[dev] test mode activated — all skills unlocked, all slots filled');
+    if (import.meta.env.DEV) {
+      console.info('[dev] test mode activated — all skills unlocked');
+    }
   }
 
   private setupJoystick() {
@@ -344,7 +356,9 @@ export class GameEngine {
     this.uiContainer.addChild(this.joystickContainer);
 
     const canvas = this.app.view as HTMLCanvasElement;
-    canvas.addEventListener('touchstart', (e) => {
+    this._joystickCanvas = canvas;
+
+    this._touchStart = (e) => {
       if (this.state.paused || this.state.gameOver) return;
       const touch = e.touches[0];
       const rect = canvas.getBoundingClientRect();
@@ -362,9 +376,9 @@ export class GameEngine {
         this.joystickKnob.y = 0;
         e.preventDefault();
       }
-    }, { passive: false });
+    };
 
-    canvas.addEventListener('touchmove', (e) => {
+    this._touchMove = (e) => {
       if (!this.joystickActive) return;
       const touch = e.touches[0];
       const rect = canvas.getBoundingClientRect();
@@ -383,17 +397,25 @@ export class GameEngine {
       this.joystickKnob.x = dx;
       this.joystickKnob.y = dy;
       e.preventDefault();
-    }, { passive: false });
+    };
 
-    const endJoystick = () => {
+    this._touchEnd = () => {
       this.joystickActive = false;
       this.joystickDX = 0;
       this.joystickDY = 0;
       this.joystickContainer.visible = false;
     };
-    canvas.addEventListener('touchend', endJoystick);
-    canvas.addEventListener('touchcancel', endJoystick);
+
+    canvas.addEventListener('touchstart', this._touchStart, { passive: false });
+    canvas.addEventListener('touchmove', this._touchMove, { passive: false });
+    canvas.addEventListener('touchend', this._touchEnd);
+    canvas.addEventListener('touchcancel', this._touchEnd);
   }
+
+  private _joystickCanvas: HTMLCanvasElement | null = null;
+  private _touchStart!: (e: TouchEvent) => void;
+  private _touchMove!: (e: TouchEvent) => void;
+  private _touchEnd!: () => void;
 
   private setupInput() {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -419,9 +441,7 @@ export class GameEngine {
       else if (key === '5') this.tryFireSkill('light_judgment');
       else if (key === '6') this.tryFireSkill('dark_abyss');
 
-      // P — 테스트 모드 전체 활성화 (URL 없이도 키 하나로 dev 모드 ON)
-      else if (key === 'p') this.enableDevMode();
-      // DEV 전용 핫키 (dev 모드에서만)
+      // DEV 전용 핫키 (dev 모드에서만 — production 빌드에서는 ?test=1 자체가 차단됨)
       else if (this.devMode && key === 'n') this.devSpawnNextBoss();
       else if (this.devMode && key === 'k') this.devKillAllBosses();
       else if (this.devMode && key === 'l') this.devLevelUp();
@@ -443,7 +463,7 @@ export class GameEngine {
   private gameLoop = () => {
     if (this.destroyed) return;
     if (this.state.gameOver) return;
-    if (this.state.paused) {
+    if (this.state.paused || this.userPaused) {
       this.render();
       return;
     }
@@ -459,9 +479,8 @@ export class GameEngine {
     updateWeaponEffects(this.state);
     updateProjectiles(this.state.projectiles);
     this.updateEnemyProjectiles();
-    // DEV: XP 오브/원소 오브 업데이트 제거
-    // updateXPOrbs(this.state.xpOrbs, this.state.player);
-    // this.handleElementOrbPickup();
+    updateXPOrbs(this.state.xpOrbs, this.state.player);
+    this.handleElementOrbPickup();
     updateParticles(this.state.particles);
     this.handleCollisions();
     this.checkLevelUp();
@@ -475,6 +494,12 @@ export class GameEngine {
     this.updateElementEffects();
     this.render();
   };
+
+  /** Public skill trigger — used by React touch buttons + keyboard handler. */
+  fireSkill(id: SkillId): void {
+    if (this.state.gameOver || this.state.paused || this.userPaused) return;
+    this.tryFireSkill(id);
+  }
 
   // ── 액티브 스킬 시스템 ──
   private tryFireSkill(id: SkillId) {
@@ -2402,9 +2427,8 @@ export class GameEngine {
       // 이번 프레임에 착탄한 운석들 처리
       const impacts = this.effectManager.earthDarkImpactsThisFrame();
       if (impacts.length > 0) {
-        // 다중 운석 동시 착탄 시 ×2까지만 (coreCollapse는 freq 지터로 stacking 안전하지만 한도 둠)
-        const impactSoundCount = Math.min(impacts.length, 2);
-        for (let s = 0; s < impactSoundCount; s++) playImpact();
+        // 운석마다 짧은 임팩트음 — 35ms throttle이 동일 프레임 다발 착탄을 1회로 합치므로 호출은 1회면 충분.
+        playMeteorImpact();
         const impactR = this.effectManager.earthDarkImpactRadius();
         const impactR2 = impactR * impactR;
         const METEOR_DAMAGE = 12;
@@ -3420,8 +3444,7 @@ export class GameEngine {
       // 착탄 — 전 유성 직격 뎀 + 타입별 추가 효과
       const imps = this.effectManager.waterEarthFireImpacts();
       if (imps.length > 0) {
-        const n = Math.min(imps.length, 2);
-        for (let s = 0; s < n; s++) playImpact();
+        playMeteorImpact();
       }
       for (const imp of imps) {
         const impCandidates = this.spatialHash.query(imp.x, imp.y, impR * 2, impR * 2, enemies.length);
@@ -3500,9 +3523,8 @@ export class GameEngine {
 
       const impacts = this.effectManager.earthFireElectricImpactsThisFrame();
       if (impacts.length > 0) {
-        // 운석 임팩트 사운드 (cap 2)
-        const meteorSoundN = Math.min(impacts.length, 2);
-        for (let s = 0; s < meteorSoundN; s++) playImpact();
+        // 운석 착탄음 (throttle이 동일 프레임 dedup 처리)
+        playMeteorImpact();
 
         const impR = this.effectManager.earthFireElectricImpactRadius();
         const impR2 = impR * impR;
@@ -3595,6 +3617,7 @@ export class GameEngine {
 
       const impacts = this.effectManager.earthFireLightImpactsThisFrame();
       if (impacts.length > 0) {
+        // 천붕 운석 — 5초 cycle 1회 거대 detonation (유성우 패턴 X). 묵직한 boom 유지.
         playImpact();
         const impR = this.effectManager.earthFireLightImpactRadius();
         const impR2 = impR * impR;
@@ -4778,6 +4801,8 @@ export class GameEngine {
 
       // ── 이번 프레임 폭발 처리 (메인 + 잔해 chunk 광역 데미지) ──
       const impacts = this.effectManager.fireUltimateImpactsThisFrame();
+      // main이든 chunk든 떨어지면 임팩트음. 35ms throttle이 chunk burst를 자연스럽게 dedup.
+      if (impacts.length > 0) playMeteorImpact();
       for (const imp of impacts) {
         const isMain = imp.type === 'main';
         const burstR = isMain ? 50 : 25;
@@ -5031,6 +5056,7 @@ export class GameEngine {
       // 이번 프레임 착탄한 운석들 처리 (다중 가능)
       const impacts = this.effectManager.earthUltimateImpactsThisFrame();
       if (impacts.length > 0) {
+        playMeteorImpact();
         const r2 = DAMAGE_RADIUS * DAMAGE_RADIUS;
         for (const imp of impacts) {
           const candidates = this.spatialHash.query(imp.x, imp.y, DAMAGE_RADIUS * 2, DAMAGE_RADIUS * 2, enemies.length);
@@ -5846,18 +5872,17 @@ export class GameEngine {
       }
     }
 
-    // Player-enemy collisions (DEV: 무적 — 피격 무시)
-    // const playerHits = checkPlayerEnemyCollisions(player, enemies, this.spatialHash);
-    // if (playerHits.length > 0) {
-    //   player.hp -= 10;
-    //   player.invincibleFrames = INVINCIBLE_FRAMES;
-    //   this.state.shakeFrames = 8;
-    //   if (player.hp <= 0) {
-    //     player.hp = 0;
-    //     this.state.gameOver = true;
-    //     showGameOver(this.gameOverOverlay, this.state, () => this.restart());
-    //   }
-    // }
+    const playerHits = checkPlayerEnemyCollisions(player, enemies, this.spatialHash);
+    if (playerHits.length > 0) {
+      player.hp -= 10;
+      player.invincibleFrames = INVINCIBLE_FRAMES;
+      this.state.shakeFrames = 8;
+      if (player.hp <= 0) {
+        player.hp = 0;
+        this.state.gameOver = true;
+        showGameOver(this.gameOverOverlay, this.state, () => this.restart());
+      }
+    }
   }
 
   private killEnemy(ei: number) {
@@ -5868,18 +5893,16 @@ export class GameEngine {
     spawnExplosionParticles(this.state.particles, e.x, e.y, e.color, wasBoss ? 40 : 10);
     playKill({ boss: wasBoss });
 
-    // DEV: XP 오브, 원소 오브 드랍 제거
-    // spawnXPOrb(this.state.xpOrbs, e.x, e.y, e.xp);
-    // if (Math.random() < ELEMENT_ORB_DROP_CHANCE) {
-    //   spawnRandomElementOrb(this.state.elementOrbs, e.x, e.y);
-    // }
+    const xpValue = Math.round(e.xp * this.state.player.stats.xpGainMul);
+    spawnXPOrb(this.state.xpOrbs, e.x, e.y, xpValue);
+    if (Math.random() < ELEMENT_ORB_DROP_CHANCE) {
+      spawnRandomElementOrb(this.state.elementOrbs, e.x, e.y);
+    }
 
     e.active = false;
 
     this.state.player.kills++;
     this.state.player.score += e.xp;
-    // DEV: XP 오브 대신 즉시 지급 (orb 드랍 비활성 상태)
-    this.state.player.xp += Math.round(e.xp * this.state.player.stats.xpGainMul);
     this.state.player.comboCount++;
     this.state.player.comboTimer = 90; // 1.5 seconds
 
@@ -5954,20 +5977,15 @@ export class GameEngine {
       if (ok) {
         this.placeBossInView(bossType);
         this._bossQueueIndex++;
-        console.info(`[boss] spawned ${bossType} (level ${player.level}, queueIdx→${this._bossQueueIndex})`);
-      } else {
+        if (import.meta.env.DEV) {
+          console.info(`[boss] spawned ${bossType} (level ${player.level}, queueIdx→${this._bossQueueIndex})`);
+        }
+      } else if (import.meta.env.DEV) {
         console.warn('[boss] spawn failed (pool full?)', bossType);
       }
     }
 
     if (!isElementLevel && !isPlaceLevel) {
-      const [choice] = rollStatChoices(1);
-      if (choice) applyStatChoice(player, choice.id);
-      return;
-    }
-
-    // DEV 모드: 레벨업 선택 UI 스킵 (devFillAll 로 슬롯은 이미 채워져있으니 스탯만 적용)
-    if (this.devMode) {
       const [choice] = rollStatChoices(1);
       if (choice) applyStatChoice(player, choice.id);
       return;
@@ -6063,6 +6081,13 @@ export class GameEngine {
     this.effectManager?.destroy();
     window.removeEventListener('keydown', this._keyDown);
     window.removeEventListener('keyup', this._keyUp);
+    if (this._joystickCanvas) {
+      this._joystickCanvas.removeEventListener('touchstart', this._touchStart);
+      this._joystickCanvas.removeEventListener('touchmove', this._touchMove);
+      this._joystickCanvas.removeEventListener('touchend', this._touchEnd);
+      this._joystickCanvas.removeEventListener('touchcancel', this._touchEnd);
+      this._joystickCanvas = null;
+    }
     this.app.ticker.remove(this.gameLoop);
     this.app.destroy(true, { children: true, texture: true });
   }
